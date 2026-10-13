@@ -679,7 +679,7 @@ impl LoadBalancer {
                     "UID-owned replacement changed during legacy recovery; retrying".to_string(),
                 )
             })?;
-        if !proof.is_unused_replacement(&replacement, &self.service_uid, &self.name) {
+        if !LegacyOwnership::is_unused_replacement(&replacement, &self.service_uid, &self.name) {
             return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
                 "Legacy LB {} (ID {}) matches the Service, but replacement {} (ID {}) is not empty and exclusively UID-owned; refusing automatic deletion",
                 legacy.name, legacy.id, replacement.name, replacement.id
@@ -751,16 +751,18 @@ impl LoadBalancer {
             return Ok(Some(lb));
         }
 
-        Ok(Some(api::create_load_balancer(
-            &self.hcloud_config,
-            &self.name,
-            &self.location,
-            &self.balancer_type,
-            self.algorithm.clone(),
-            self.public_interface,
-            &self.service_uid,
-        )
-        .await?))
+        Ok(Some(
+            api::create_load_balancer(
+                &self.hcloud_config,
+                &self.name,
+                &self.location,
+                &self.balancer_type,
+                self.algorithm.clone(),
+                self.public_interface,
+                &self.service_uid,
+            )
+            .await?,
+        ))
     }
 
     /// Get the network from Hetzner Cloud.
