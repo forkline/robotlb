@@ -13,6 +13,23 @@ fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
     matches!(err, hcloud::apis::Error::ResponseError(response) if response.status.as_u16() == 429)
 }
 
+/// Remove the Hetzner API token (including a quoted prefix) from diagnostics.
+///
+/// Hetzner error bodies can contain a token prefix, not only the complete token.
+/// Eight bytes is the shortest prefix we treat as secret so short unrelated
+/// text does not get unnecessarily replaced.
+#[must_use]
+pub fn redact(message: &str, token: &str) -> String {
+    const MIN_PREFIX: usize = 8;
+    let mut safe = message.to_string();
+    for len in (MIN_PREFIX..=token.len()).rev() {
+        if let Some(prefix) = token.get(..len) {
+            safe = safe.replace(prefix, "[REDACTED]");
+        }
+    }
+    safe
+}
+
 /// All possible errors that can occur in the robotlb operator.
 #[derive(Debug, Error)]
 pub enum RobotLBError {
@@ -179,5 +196,39 @@ impl RobotLBError {
             .ok()
             .and_then(|body| body.pointer("/error/code")?.as_str().map(str::to_owned))
             .is_some_and(|code| code == "target_already_defined")
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::redact;
+
+    const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ01";
+
+    #[test]
+    fn redacts_complete_token_and_quoted_prefix() {
+        assert_eq!(
+            redact(&format!("bad token {TOKEN}"), TOKEN),
+            "bad token [REDACTED]"
+        );
+        assert_eq!(
+            redact(&format!("invalid token {}", &TOKEN[..24]), TOKEN),
+            "invalid token [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn leaves_unrelated_messages_and_short_prefixes_intact() {
+        assert_eq!(redact("Hetzner 500", TOKEN), "Hetzner 500");
+        assert_eq!(redact("short abcdefg", TOKEN), "short abcdefg");
+        assert_eq!(redact("empty token", ""), "empty token");
+    }
+
+    #[test]
+    fn redacts_non_ascii_surrounding_text() {
+        assert_eq!(
+            redact(&format!("échec {} 🦀", &TOKEN[..8]), TOKEN),
+            "échec [REDACTED] 🦀"
+        );
     }
 }
