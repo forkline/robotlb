@@ -5,33 +5,37 @@
 
 mod event_throttle;
 mod events;
-mod reconcile;
 mod node_changes;
 mod nodes;
+mod reconcile;
 mod slice_changes;
 mod status;
 
 pub(crate) use event_throttle::EventThrottle;
-use reconcile::{reconcile_service, on_error};
 #[cfg(test)]
-use reconcile::{ReconcileOutcome, PendingReason, INGRESS_RETRY_INTERVAL, should_reset_failure_backoff, should_retry_missing_ingress, error_action};
+use events::{event_note, warning_reason};
 #[cfg(test)]
-use events::{warning_reason, event_note};
+use reconcile::{
+    INGRESS_RETRY_INTERVAL, PendingReason, ReconcileOutcome, error_action,
+    should_reset_failure_backoff, should_retry_missing_ingress,
+};
+use reconcile::{on_error, reconcile_service};
 use slice_changes::{SliceChanges, SliceTargetMode};
+#[cfg(test)]
+use kube::runtime::controller::Action;
+#[cfg(test)]
+use std::time::Duration;
 
 use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
+    sync::Arc,
 };
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
-    Resource, ResourceExt,
+    ResourceExt,
     runtime::{
         Controller, WatchStreamExt,
-        controller::Action,
-        events::{Event, EventType, Recorder, Reporter},
         reflector::ObjectRef,
         watcher,
     },
@@ -40,7 +44,6 @@ use kube::{
 use crate::{
     CurrentContext, consts,
     error::{RobotLBError, RobotLBResult},
-    finalizers,
     metrics::ReconcileTimer,
 };
 
@@ -322,9 +325,10 @@ mod tests {
         let error = RobotLBError::HCloudError("temporary outage".to_string());
         let first = error_action(&error, &rate_limit, &backoff, now, svc);
         assert_eq!(first, Action::requeue(Duration::from_secs(5)));
-        let delayed = Ok(ReconcileOutcome::Deferred(PendingReason::RateLimited, Action::requeue(
-            Duration::from_secs(60),
-        )));
+        let delayed = Ok(ReconcileOutcome::Deferred(
+            PendingReason::RateLimited,
+            Action::requeue(Duration::from_secs(60)),
+        ));
         assert!(!should_reset_failure_backoff(&delayed));
         // This is the exact shared-429 deferral path: it must not call forget().
         if should_reset_failure_backoff(&delayed) {
