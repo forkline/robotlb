@@ -270,4 +270,12 @@ of 1–63 lowercase letters, digits and hyphens. Default LB names then become
 Hetzner's 128-character limit. Explicit `robotlb/balancer` names are not
 prefixed. Existing owned balancers continue to be selected by immutable Service
 UID labels, so changing the prefix does **not** rename or adopt them.
-Unlabelled legacy balancers are not automatically adopted.
+Legacy load balancers created by 0.6.x are automatically migrated in place on
+upgrade, provided the Kubernetes Service still carries the `robotlb/finalizer`
+and its published ingress IPs match the Hetzner LB with the expected name.
+RobotLB adds `robotlb/service-uid` while preserving unrelated Hetzner labels,
+then verifies ownership before changing any LB configuration. This also applies
+when deleting a legacy Service after an upgrade. LB IDs and IPs are preserved;
+no upgrade hook or manual migration is required. If the finalizer, ingress
+status, or IP identity has been lost, RobotLB refuses adoption rather than
+claiming an unrelated LB. Such exceptional cases require operator review.

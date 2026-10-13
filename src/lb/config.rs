@@ -125,7 +125,7 @@ fn fnv1a64(value: &str) -> u64 {
     })
 }
 
-fn default_name(cluster: Option<&str>, service: &str, namespace: &str) -> String {
+pub(super) fn default_name(cluster: Option<&str>, service: &str, namespace: &str) -> String {
     let name = cluster.map_or_else(
         || format!("{service}.{namespace}"),
         |cluster| format!("{cluster}.{service}.{namespace}"),

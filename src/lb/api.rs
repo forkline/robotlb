@@ -14,17 +14,19 @@ use hcloud::{
             AddServiceParams, AddTargetParams, AttachLoadBalancerToNetworkParams,
             ChangeAlgorithmParams, ChangeTypeOfLoadBalancerParams, DeleteLoadBalancerParams,
             DeleteServiceParams, DetachLoadBalancerFromNetworkParams, ListLoadBalancersParams,
-            RemoveTargetParams, UpdateServiceParams,
+            RemoveTargetParams, ReplaceLoadBalancerParams, UpdateServiceParams,
         },
         networks_api::ListNetworksParams,
     },
     models::{
         AttachLoadBalancerToNetworkRequest, ChangeTypeOfLoadBalancerRequest, DeleteServiceRequest,
         DetachLoadBalancerFromNetworkRequest, LoadBalancerAddTarget, LoadBalancerAlgorithm,
-        LoadBalancerService, RemoveTargetRequest, UpdateLoadBalancerService,
+        LoadBalancerService, RemoveTargetRequest, ReplaceLoadBalancerRequest,
+        UpdateLoadBalancerService,
     },
 };
 
+use super::legacy::LegacyOwnership;
 use crate::{
     consts,
     error::{RobotLBError, RobotLBResult},
@@ -273,6 +275,98 @@ pub async fn get_load_balancer(
         return Err(RobotLBError::SkipService);
     }
     Ok(matching.into_iter().next())
+}
+
+/// Adopt an unlabelled 0.6.x LB only when the Service's old finalizer and
+/// published ingress addresses match the Hetzner resource. No listeners,
+/// targets, networks, IDs or IPs are changed during adoption.
+///
+/// If a name is occupied without verifiable evidence, preserve the 0.7.0
+/// safety behavior and refuse to touch the resource.
+pub(super) async fn find_or_adopt_legacy_load_balancer(
+    hcloud_config: &HcloudConfig,
+    uid: &str,
+    desired_name: &str,
+    proof: Option<&LegacyOwnership>,
+) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+    let mut names = vec![desired_name.to_string()];
+    if let Some(proof) = proof {
+        for name in proof.names() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+
+    let mut matching = Vec::new();
+    let mut occupied = false;
+    for name in names {
+        if let Some(lb) = get_load_balancer(hcloud_config, &name).await? {
+            occupied = true;
+            if proof.is_some_and(|proof| proof.labels_for_adoption(&lb, uid).is_some()) {
+                matching.push(lb);
+            }
+        }
+    }
+    if matching.len() > 1 {
+        return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+            "Multiple legacy load balancers match Service UID {uid}; refusing ambiguous adoption"
+        )));
+    }
+    if let Some(candidate) = matching.pop() {
+        // Re-fetch directly before the write to avoid replacing stale label maps.
+        // A concurrent Hetzner update yields a conflict and the next reconcile
+        // rechecks the full ownership evidence rather than retrying a stale PUT.
+        let fresh = get_load_balancer(hcloud_config, &candidate.name)
+            .await?
+            .filter(|lb| lb.id == candidate.id)
+            .ok_or_else(|| {
+                RobotLBError::HCloudError(
+                    "Legacy load balancer changed during adoption; retrying".to_string(),
+                )
+            })?;
+        let labels = proof
+            .and_then(|proof| proof.labels_for_adoption(&fresh, uid))
+            .ok_or_else(|| {
+                RobotLBError::InvalidLoadBalancerConfiguration(
+                    "Legacy load balancer no longer matches Service ownership evidence".to_string(),
+                )
+            })?;
+        hcloud::apis::load_balancers_api::replace_load_balancer(
+            hcloud_config,
+            ReplaceLoadBalancerParams {
+                id: fresh.id,
+                replace_load_balancer_request: ReplaceLoadBalancerRequest {
+                    labels: Some(labels),
+                    name: None,
+                },
+            },
+        )
+        .await?;
+        // Never proceed with regular reconciliation or deletion until the UID
+        // ownership lookup confirms that the same immutable LB ID is ours.
+        let owned = get_owned_load_balancer(hcloud_config, uid).await?;
+        if let Some(owned) = owned
+            && owned.id == fresh.id
+        {
+            tracing::info!(
+                lb_id = owned.id,
+                lb_name = %owned.name,
+                service_uid = uid,
+                "Adopted legacy Hetzner load balancer in place"
+            );
+            return Ok(Some(owned));
+        }
+        return Err(RobotLBError::HCloudError(
+            "Legacy load balancer label not yet verified; retrying".to_string(),
+        ));
+    }
+    if occupied {
+        return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+            "LB name {desired_name} is already in use by an unowned resource; refusing to adopt or modify it"
+        )));
+    }
+    Ok(None)
 }
 
 /// Create a new load balancer.
