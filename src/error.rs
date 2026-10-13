@@ -267,7 +267,8 @@ mod redaction_tests {
 
         let error = Error::<ListLoadBalancersError>::ResponseError(ResponseContent {
             status: 503_u16.try_into().unwrap(),
-            content: r#"{"error":{"code":"robot_unavailable","message":"back end busy"}}"#.to_string(),
+            content: r#"{"error":{"code":"robot_unavailable","message":"back end busy"}}"#
+                .to_string(),
             entity: None,
         });
         let description = super::describe_hcloud(&error);
