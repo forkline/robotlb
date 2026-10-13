@@ -245,10 +245,11 @@ Node changes that affect targets (readiness, labels, cordon state or addresses)
 trigger reconciliation immediately; kubelet heartbeats do not. For `Local`
 Services, EndpointSlice updates reconcile only when relevant target nodes change:
 Pod-selector Services ignore endpoint readiness/address churn, while selectorless
-Services track ready endpoint nodes. EndpointSlice deletions also trigger
-reconciliation. On otherwise unchanged Services, the operator compares the
-desired Service spec, `robotlb/` annotations, target IPs and listener ports with
-the last successful reconcile and skips Hetzner requests.
+Services track ready endpoint nodes. EndpointSlice deletions and ownership-label
+changes also trigger reconciliation. On otherwise unchanged Services, the operator
+compares the desired Service spec, `robotlb/` annotations, target IPs and listener
+ports with the last successful reconcile and skips Hetzner requests, but repairs
+unexpected ingress status changes from the last successful status snapshot.
 Every `ROBOTLB_RESYNC_INTERVAL` seconds (default **300**) it performs a full
 check anyway to recover out-of-band changes made in Hetzner.
 
@@ -256,9 +257,11 @@ A failing Service retries independently with exponential backoff from 5 seconds
 up to 5 minutes, without suppressing reconciliation triggered by Kubernetes
 watch events. Project-wide Hetzner API rate limits use the separate shared gate
 without resetting the per-Service failure backoff. After Hetzner creates an LB,
-the operator retries every 15 seconds until an ingress address is available;
-an incomplete provisioning response is never cached. Errors remain visible in
-logs and Kubernetes Warning Events.
+the operator retries every 15 seconds until an ingress address is available.
+After 180 seconds without an ingress address, it reports a reconciliation error
+and emits throttled Kubernetes Warning Events while continuing the same 15-second
+polling interval. Incomplete provisioning is never memoized. Other errors use
+the normal failure backoff.
 
 When several clusters share one Hetzner Cloud project, set
 `ROBOTLB_CLUSTER_NAME` (for example `prod`) to a DNS-label prefix
