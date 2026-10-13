@@ -192,7 +192,8 @@ impl LoadBalancer {
                                 },
                             )),
                         };
-                    retry_temporary(|| api.update_service(hcloud_balancer.id, desired.clone())).await?;
+                    retry_temporary(|| api.update_service(hcloud_balancer.id, desired.clone()))
+                        .await?;
                 }
                 ServiceReconcileAction::Delete { listen_port } => {
                     tracing::info!(
@@ -211,22 +212,23 @@ impl LoadBalancer {
                         listen_port
                     );
                     let desired = LoadBalancerService {
+                        http: None,
+                        listen_port,
+                        destination_port,
+                        protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
+                        proxyprotocol: self.proxy_mode,
+                        health_check: Box::new(LoadBalancerServiceHealthCheck {
                             http: None,
-                            listen_port,
-                            destination_port,
-                            protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
-                            proxyprotocol: self.proxy_mode,
-                            health_check: Box::new(LoadBalancerServiceHealthCheck {
-                                http: None,
-                                interval: self.check_interval,
-                                port: destination_port,
-                                protocol:
-                                    hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
-                                retries: self.retries,
-                                timeout: self.timeout,
-                            }),
-                        };
-                    retry_temporary(|| api.add_service(hcloud_balancer.id, desired.clone())).await?;
+                            interval: self.check_interval,
+                            port: destination_port,
+                            protocol:
+                                hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
+                            retries: self.retries,
+                            timeout: self.timeout,
+                        }),
+                    };
+                    retry_temporary(|| api.add_service(hcloud_balancer.id, desired.clone()))
+                        .await?;
                 }
             }
         }
@@ -247,11 +249,14 @@ impl LoadBalancer {
             match action {
                 TargetReconcileAction::Remove { target_ip } => {
                     tracing::info!("Removing target {}", target_ip);
-                    retry_temporary(|| api.remove_target(hcloud_balancer.id, target_ip.clone())).await?;
+                    retry_temporary(|| api.remove_target(hcloud_balancer.id, target_ip.clone()))
+                        .await?;
                 }
                 TargetReconcileAction::Add { target_ip } => {
                     tracing::info!("Adding target {}", target_ip);
-                    match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone())).await {
+                    match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone()))
+                        .await
+                    {
                         Err(error) if error.target_already_defined() => {
                             tracing::debug!("Target was already added in an earlier attempt");
                         }
@@ -453,12 +458,15 @@ impl LoadBalancer {
 
         if !is_attached && let Some(network_id) = desired_network {
             tracing::info!("Attaching balancer to network {}", network_id);
-            retry_temporary(|| api::attach_to_network(
-                &self.hcloud_config,
-                hcloud_balancer.id,
-                network_id,
-                self.private_ip.clone(),
-            )).await?;
+            retry_temporary(|| {
+                api::attach_to_network(
+                    &self.hcloud_config,
+                    hcloud_balancer.id,
+                    network_id,
+                    self.private_ip.clone(),
+                )
+            })
+            .await?;
         }
         Ok(())
     }
@@ -486,11 +494,10 @@ impl LoadBalancer {
             }
 
             tracing::info!("Detaching balancer from network {}", private_net_id);
-            retry_temporary(|| api::detach_from_network(
-                &self.hcloud_config,
-                hcloud_balancer.id,
-                private_net_id,
-            )).await?;
+            retry_temporary(|| {
+                api::detach_from_network(&self.hcloud_config, hcloud_balancer.id, private_net_id)
+            })
+            .await?;
         }
 
         Ok(is_attached)

@@ -126,7 +126,8 @@ fn is_transient_hcloud<E>(err: &hcloud::apis::Error<E>) -> bool {
     let hcloud::apis::Error::ResponseError(response) = err else {
         return false;
     };
-    if response.status.as_u16() == 409 || response.status.as_u16() == 423
+    if response.status.as_u16() == 409
+        || response.status.as_u16() == 423
         || response.status.is_server_error()
     {
         return true;
@@ -162,7 +163,8 @@ impl RobotLBError {
 
     /// The target was added by a previous attempt whose response was lost.
     pub fn target_already_defined(&self) -> bool {
-        let Self::HcloudLBAddTargetError(hcloud::apis::Error::ResponseError(response)) = self else {
+        let Self::HcloudLBAddTargetError(hcloud::apis::Error::ResponseError(response)) = self
+        else {
             return false;
         };
         k8s_openapi::serde_json::from_str::<k8s_openapi::serde_json::Value>(&response.content)
