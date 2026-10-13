@@ -1220,7 +1220,9 @@ mod tests {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
         let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
-        remote.targets.push(hcloud::models::LoadBalancerTarget::default());
+        remote
+            .targets
+            .push(hcloud::models::LoadBalancerTarget::default());
 
         assert_eq!(
             lb.plan_target_actions(&remote, 3).unwrap(),
