@@ -41,7 +41,6 @@ use crate::{
     CurrentContext, consts,
     error::{RobotLBError, RobotLBResult},
     finalizers,
-    lb::LoadBalancer,
     metrics::ReconcileTimer,
 };
 
