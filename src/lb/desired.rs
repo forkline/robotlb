@@ -9,7 +9,7 @@ use kube::ResourceExt;
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub(crate) struct DesiredLoadBalancer {
+pub struct DesiredLoadBalancer {
     config: ParsedLoadBalancerConfig,
     service_uid: String,
     targets: Vec<String>,
@@ -26,7 +26,7 @@ impl DesiredLoadBalancer {
         })
     }
 
-    pub(crate) fn ip_type(&self) -> &'static str {
+    pub(crate) const fn ip_type(&self) -> &'static str {
         if self.config.network_name.is_some() {
             "InternalIP"
         } else {

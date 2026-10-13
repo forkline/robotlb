@@ -6,10 +6,11 @@ use super::{
     ensure_service_is_supported, patch_ingress_status,
 };
 use crate::{
-    lb::{DesiredLoadBalancer, LoadBalancer},
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
-    finalizers, memo,
+    finalizers,
+    lb::{DesiredLoadBalancer, LoadBalancer},
+    memo,
     metrics::ReconcileTimer,
 };
 use k8s_openapi::api::core::v1::Service;
