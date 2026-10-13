@@ -6,10 +6,12 @@
 mod event_throttle;
 mod node_changes;
 mod nodes;
+mod slice_changes;
 mod status;
 
 use event_throttle::EventKey;
 pub(crate) use event_throttle::EventThrottle;
+use slice_changes::{SliceChanges, SliceTargetMode};
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -369,15 +371,37 @@ pub fn map_endpoint_slice_to_service(
     Some(ObjectRef::new(&service_name).within(&namespace))
 }
 
-/// Wake all Services only when target-relevant Node state changes.
-/// Periodic resync still detects out-of-band Hetzner changes.
-fn node_change_signals(client: kube::Client) -> impl futures::Stream<Item = ()> + Send + Sync {
+/// Whether an EndpointSlice change can move the nodes selected by a Service.
+/// Preserve Pod-based Local discovery rather than switching to EndpointSlice readiness.
+fn slice_target_mode(svc: &Service, dynamic_node_selector: bool) -> Option<SliceTargetMode> {
+    if !dynamic_node_selector || ensure_service_is_supported(svc).is_err() {
+        return None;
+    }
+    let spec = svc.spec.as_ref()?;
+    if spec.external_traffic_policy.as_deref() != Some("Local") {
+        return None;
+    }
+    Some(if spec.selector.as_ref().is_some_and(|selector| !selector.is_empty()) {
+        SliceTargetMode::PodNodes
+    } else {
+        SliceTargetMode::ReadyEndpointNodes
+    })
+}
+
+/// Wake all Services only when target-relevant Nodes change or an observed
+/// EndpointSlice is removed. Ordinary EndpointSlice changes use the targeted mapper.
+fn node_change_signals(
+    client: kube::Client,
+    slice_changes: Arc<SliceChanges>,
+) -> impl futures::Stream<Item = ()> + Send + Sync {
     let (sender, receiver) = futures::channel::mpsc::unbounded();
+    let node_sender = sender.clone();
+    let node_client = client.clone();
     tokio::spawn(async move {
         let mut changes = node_changes::NodeChanges::default();
         let mut events = std::pin::pin!(
             watcher::watcher(
-                kube::Api::<k8s_openapi::api::core::v1::Node>::all(client),
+                kube::Api::<k8s_openapi::api::core::v1::Node>::all(node_client),
                 watcher::Config::default(),
             )
             .default_backoff()
@@ -385,11 +409,34 @@ fn node_change_signals(client: kube::Client) -> impl futures::Stream<Item = ()> 
         while let Some(event) = events.next().await {
             match event {
                 Ok(event) => {
-                    if changes.observe(&event) && sender.unbounded_send(()).is_err() {
+                    if changes.observe(&event) && node_sender.unbounded_send(()).is_err() {
                         return;
                     }
                 }
                 Err(error) => tracing::warn!(%error, "Node watch failed"),
+            }
+        }
+    });
+
+    // kube-runtime's watch mapper receives an object but not the event kind.
+    // A cheap second watch on only EndpointSlice metadata ensures deletion
+    // events (and deletions during relists) cannot leave stale target nodes.
+    tokio::spawn(async move {
+        let mut events = std::pin::pin!(
+            watcher::metadata_watcher(
+                kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(client),
+                watcher::Config::default(),
+            )
+            .default_backoff()
+        );
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    if slice_changes.track(&event) && sender.unbounded_send(()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "EndpointSlice metadata watch failed"),
             }
         }
     });
@@ -404,15 +451,33 @@ pub async fn run(
 ) {
     let controller_shutdown = shutdown.clone();
     let hcloud_token = context.config.hcloud_token.clone();
-    Controller::new(
+    let controller = Controller::new(
         kube::Api::<Service>::all(kube_client),
         watcher::Config::default(),
-    )
-    .reconcile_all_on(node_change_signals(context.client.clone()))
+    );
+    let services = controller.store();
+    let slice_changes = Arc::new(SliceChanges::default());
+    let dynamic_node_selector = context.config.dynamic_node_selector;
+    controller
+    .reconcile_all_on(node_change_signals(
+        context.client.clone(),
+        slice_changes.clone(),
+    ))
     .watches(
         kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(context.client.clone()),
         watcher::Config::default(),
-        |endpoint_slice| map_endpoint_slice_to_service(&endpoint_slice),
+        move |endpoint_slice| {
+            let service_ref = map_endpoint_slice_to_service(&endpoint_slice)?;
+            let service = services.get(&service_ref)?;
+            match slice_target_mode(&service, dynamic_node_selector) {
+                Some(mode) if slice_changes.observe(&endpoint_slice, mode) => Some(service_ref),
+                Some(_) => None,
+                None => {
+                    slice_changes.forget(&endpoint_slice);
+                    None
+                }
+            }
+        },
     )
     .run(reconcile_service, on_error, context)
     .take_until(controller_shutdown.cancelled())
@@ -545,6 +610,27 @@ mod tests {
             ..Default::default()
         }];
         assert!(!should_retry_missing_ingress(&ingress));
+    }
+
+    #[test]
+    fn slice_watches_are_only_used_for_dynamic_local_targets() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        assert_eq!(slice_target_mode(&svc, true), None);
+        svc.spec.as_mut().unwrap().external_traffic_policy = Some("Local".to_string());
+        assert_eq!(
+            slice_target_mode(&svc, true),
+            Some(SliceTargetMode::ReadyEndpointNodes)
+        );
+        svc.spec.as_mut().unwrap().selector = Some(
+            [("app".to_string(), "web".to_string())].into(),
+        );
+        assert_eq!(
+            slice_target_mode(&svc, true),
+            Some(SliceTargetMode::PodNodes)
+        );
+        assert_eq!(slice_target_mode(&svc, false), None);
+        svc.spec.as_mut().unwrap().load_balancer_class = Some("other".to_string());
+        assert_eq!(slice_target_mode(&svc, true), None);
     }
 
     #[test]
