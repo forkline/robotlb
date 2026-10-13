@@ -8,6 +8,7 @@
 mod api;
 mod config;
 mod desired;
+mod legacy;
 mod types;
 
 pub(crate) use desired::DesiredLoadBalancer;
@@ -26,15 +27,17 @@ use hcloud::{
     },
 };
 use k8s_openapi::api::core::v1::Service;
+use kube::ResourceExt;
 
 use crate::{
-    CurrentContext,
+    CurrentContext, consts,
     error::{RobotLBError, RobotLBResult},
 };
 
 pub(crate) use api::{HcloudLoadBalancerApi, LiveHcloudLoadBalancerApi};
 pub use config::parse_cluster_name;
 pub(crate) use config::parse_load_balancer_config;
+use legacy::LegacyOwnership;
 use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service_matches_desired};
 
 /// Struct representing a load balancer.
@@ -47,6 +50,8 @@ pub struct LoadBalancer {
     pub name: String,
     /// Service UID, used as the stable ownership identity in Hetzner.
     service_uid: String,
+    /// Legacy 0.6.x adoption evidence; only present when ingress and finalizer exist.
+    legacy_ownership: Option<LegacyOwnership>,
     /// Services exposed by the load balancer (`listen_port` -> `target_port`).
     pub services: HashMap<i32, i32>,
     /// Target IPs for the load balancer.
@@ -500,7 +505,33 @@ impl LoadBalancer {
             .uid
             .as_deref()
             .ok_or(RobotLBError::SkipService)?;
-        let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await? else {
+        let lb = if let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await?
+        {
+            Some(lb)
+        } else {
+            // A 0.6.x Service may be deleted immediately after upgrading.
+            // Verify and label its LB before deletion; never silently orphan it.
+            let legacy = LegacyOwnership::from_service(svc, &context.config);
+            let name = svc
+                .annotations()
+                .get(consts::LB_NAME_ANNOTATION)
+                .cloned()
+                .unwrap_or_else(|| {
+                    config::default_name(
+                        context.config.cluster_name.as_deref(),
+                        &svc.name_any(),
+                        &svc.namespace().unwrap_or_else(|| "default".to_string()),
+                    )
+                });
+            api::find_or_adopt_legacy_load_balancer(
+                &context.hcloud_config,
+                uid,
+                &name,
+                legacy.as_ref(),
+            )
+            .await?
+        };
+        let Some(lb) = lb else {
             return Ok(());
         };
         retry_temporary(|| api::delete_load_balancer(&context.hcloud_config, lb.id)).await
@@ -569,7 +600,17 @@ impl LoadBalancer {
 
     /// Get an owned LB or create a new one after validating capacity and name.
     async fn get_or_create_hcloud_lb(&self) -> RobotLBResult<hcloud::models::LoadBalancer> {
-        let existing = self.get_hcloud_lb().await?;
+        let existing = if let Some(lb) = self.get_hcloud_lb().await? {
+            Some(lb)
+        } else {
+            api::find_or_adopt_legacy_load_balancer(
+                &self.hcloud_config,
+                &self.service_uid,
+                &self.name,
+                self.legacy_ownership.as_ref(),
+            )
+            .await?
+        };
         // Reuse capacity data on an unchanged type; querying Hetzner's catalog
         // is required only for creation or type changes.
         if let Some(lb) = existing.as_ref()
@@ -585,16 +626,6 @@ impl LoadBalancer {
         }
         if let Some(lb) = existing {
             return Ok(lb);
-        }
-
-        if api::get_load_balancer(&self.hcloud_config, &self.name)
-            .await?
-            .is_some()
-        {
-            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
-                "LB name {} is already in use by an unowned resource; refusing to adopt or modify it",
-                self.name
-            )));
         }
 
         api::create_load_balancer(
@@ -892,6 +923,7 @@ mod tests {
         LoadBalancer {
             name: "svc-name".to_string(),
             service_uid: "test-uid".to_string(),
+            legacy_ownership: None,
             services: HashMap::new(),
             targets: vec![],
             private_ip: None,
