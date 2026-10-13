@@ -13,10 +13,7 @@ use crate::{
     metrics::ReconcileTimer,
 };
 use k8s_openapi::api::core::v1::Service;
-use kube::{
-    Resource, ResourceExt,
-    runtime::controller::Action,
-};
+use kube::{Resource, ResourceExt, runtime::controller::Action};
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
