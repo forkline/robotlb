@@ -318,6 +318,35 @@ pub fn map_endpoint_slice_to_service(
     Some(ObjectRef::new(&service_name).within(&namespace))
 }
 
+/// Wake all Services only when target-relevant Node state changes.
+/// Periodic resync still detects out-of-band Hetzner changes.
+fn node_change_signals(
+    client: kube::Client,
+) -> impl futures::Stream<Item = ()> + Send + Sync {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    tokio::spawn(async move {
+        let mut changes = node_changes::NodeChanges::default();
+        let mut events = std::pin::pin!(
+            watcher::watcher(
+                kube::Api::<k8s_openapi::api::core::v1::Node>::all(client),
+                watcher::Config::default(),
+            )
+            .default_backoff()
+        );
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    if changes.observe(&event) && sender.unbounded_send(()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Node watch failed"),
+            }
+        }
+    });
+    receiver
+}
+
 /// Create and run the controller.
 pub async fn run(
     kube_client: kube::Client,
@@ -330,6 +359,7 @@ pub async fn run(
         kube::Api::<Service>::all(kube_client),
         watcher::Config::default(),
     )
+    .reconcile_all_on(node_change_signals(context.client.clone()))
     .watches(
         kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(context.client.clone()),
         watcher::Config::default(),
