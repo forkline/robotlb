@@ -210,6 +210,27 @@ mod tests {
     }
 
     #[test]
+    fn namespace_is_part_of_default_balancer_name() {
+        let config = base_config();
+        let mut svc = service_with_annotations([]);
+        svc.metadata.namespace = Some("production".to_string());
+        let parsed = parse_load_balancer_config(&svc, &config).expect("valid config");
+        assert_eq!(parsed.name, "svc-name.production");
+    }
+
+    #[test]
+    fn rejects_empty_balancer_or_network_name() {
+        let config = base_config();
+        for (annotation, value) in [
+            (consts::LB_NAME_ANNOTATION, ""),
+            (consts::LB_NETWORK_ANNOTATION, ""),
+        ] {
+            let svc = service_with_annotations([(annotation, value)]);
+            assert!(parse_load_balancer_config(&svc, &config).is_err());
+        }
+    }
+
+    #[test]
     fn parses_annotations_into_load_balancer_config() {
         let mut config = base_config();
         config.default_network = None;

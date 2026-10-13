@@ -557,16 +557,8 @@ impl LoadBalancer {
                     "Balancer {name} belongs to a different Service UID: {owner}"
                 )));
             }
-            // Names alone are not ownership evidence. Old robotlb targets were
-            // exclusively IPs, and at least one must match an eligible node.
-            let has_matching_target = lb.targets.iter().any(|target| {
-                target
-                    .ip
-                    .as_ref()
-                    .is_some_and(|ip| self.targets.contains(&ip.ip))
-            });
-            let ip_only = lb.targets.iter().all(|target| target.ip.is_some());
-            if ip_only && has_matching_target {
+            // Names alone are not proof of ownership.
+            if can_adopt_legacy(&lb, &self.targets) {
                 return api::adopt_load_balancer(&self.hcloud_config, &lb, &self.service_uid)
                     .await
                     .map(Some);
@@ -646,12 +638,50 @@ impl LoadBalancer {
     }
 }
 
+/// Conservative migration: legacy balancers can be adopted only if they use IP
+/// targets exclusively and have at least one target on this Service's nodes.
+fn can_adopt_legacy(lb: &hcloud::models::LoadBalancer, service_targets: &[String]) -> bool {
+    lb.targets
+        .iter()
+        .all(|target| target.r#type == hcloud::models::load_balancer_target::Type::Ip)
+        && lb.targets.iter().any(|target| {
+            target
+                .ip
+                .as_ref()
+                .is_some_and(|ip| service_targets.contains(&ip.ip))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use hcloud::apis::configuration::Configuration as HcloudConfig;
     use std::sync::Mutex;
+
+    #[test]
+    fn legacy_adoption_requires_ip_targets_and_node_overlap() {
+        let ip = hcloud::models::LoadBalancerTarget {
+            r#type: hcloud::models::load_balancer_target::Type::Ip,
+            ip: Some(Box::new(hcloud::models::LoadBalancerTargetIp {
+                ip: "192.0.2.10".to_string(),
+            })),
+            ..Default::default()
+        };
+        let desired = vec!["192.0.2.10".to_string()];
+        let mut lb = hcloud::models::LoadBalancer {
+            targets: vec![ip],
+            ..Default::default()
+        };
+        assert!(can_adopt_legacy(&lb, &desired));
+        assert!(!can_adopt_legacy(&lb, &[]));
+        assert!(!can_adopt_legacy(&lb, &["192.0.2.11".to_string()]));
+        lb.targets.push(hcloud::models::LoadBalancerTarget {
+            r#type: hcloud::models::load_balancer_target::Type::Server,
+            ..Default::default()
+        });
+        assert!(!can_adopt_legacy(&lb, &desired));
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum ApiCall {

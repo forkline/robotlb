@@ -62,11 +62,46 @@ affinity:
 The operator listens to the Kubernetes API for services of type `LoadBalancer` and creates Hetzner
 load balancers that point to nodes based on `node-ip`.
 
-Nodes are selected based on where the service's target pods are deployed, which is determined by
-searching for pods with the service's selector. This behavior can be configured.
+With `ROBOTLB_DYNAMIC_NODE_SELECTOR=true`, target nodes respect the Service's
+`externalTrafficPolicy`:
 
-It also watches `EndpointSlice` objects to react quickly to backend rollout/placement changes, with
-an additional periodic reconcile as a resilience fallback.
+- `Cluster` (default): all Ready, schedulable nodes except those labelled
+  `node.kubernetes.io/exclude-from-external-load-balancers`.
+- `Local`: nodes hosting the Service's pods; selectorless Services instead use
+  ready `EndpointSlice` endpoints. Unready and excluded nodes are omitted.
+- With dynamic selection disabled, `robotlb/node-selector` selects targets, also
+  excluding unready and excluded nodes.
+
+The controller watches `EndpointSlice` changes and resyncs all Services periodically.
+Every TCP Service port must have an allocated `nodePort`; a Service with no
+exposable ports does not create a billable but unusable balancer.
+Target selection is bounded by the Hetzner load balancer type's capacity.
+
+### Upgrading existing load balancers
+
+**Review this before rolling out the new operator.** Balancers created by this
+version receive the Hetzner label `robotlb/service-uid=<Kubernetes Service UID>`.
+Existing balancers keep their public IPs when the operator can safely adopt them:
+they must have IP-only targets and at least one target matching the Service's nodes.
+The operator adds the ownership label in place and preserves all other labels.
+
+Without `robotlb/balancer`, new balancers are named
+`<service>.<namespace>`, rather than just `<service>`. The former name is
+checked first for conservative migration. A name collision alone never grants
+ownership. If the existing balancer has no matching targets, it may remain
+unlabelled while a new balancer is created, with a different IP. Audit these cases.
+
+**Deletion and type/class changes delete only balancers carrying the matching UID
+label.** An existing unlabelled balancer that was never adopted is left untouched;
+it must be reviewed and cleaned up manually to avoid continued billing.
+List unlabelled balancers with `hcloud load-balancer list --selector '!robotlb/service-uid'`.
+To manually associate a verified balancer, use
+`hcloud load-balancer add-label '<balancer-name>' robotlb/service-uid=<service-uid>`.
+Never label a balancer still owned by another Service or cluster.
+
+If several clusters share one Hetzner project, use explicit, unique balancer
+names to avoid collisions. Set `spec.loadBalancerClass: robotlb` on newly created
+Services to avoid concurrent management by another load balancer controller.
 
 ## Configuration
 
@@ -132,7 +167,7 @@ kind: Service
 metadata:
   name: target
   annotations:
-    # Custom name of the balancer to create on Hetzner. Defaults to service name.
+    # Custom name of the balancer to create on Hetzner. Defaults to <service>.<namespace>.
     robotlb/balancer: "custom name"
     # Hetzner cloud network. If this annotation is missing, the operator will try to
     # assign external IPs to the load balancer if available. Otherwise, the update won't happen.
