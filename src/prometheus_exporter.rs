@@ -195,6 +195,7 @@ fn format_attributes<'a>(attrs: impl Iterator<Item = &'a KeyValue>) -> String {
 }
 
 impl PushMetricExporter for PrometheusExporter {
+    #[allow(clippy::unused_async_trait_impl)] // Required by the SDK's async exporter trait.
     async fn export(&self, metrics: &ResourceMetrics) -> Result<(), OTelSdkError> {
         let formatted = Self::format_metrics(metrics);
         *self.data.lock().unwrap() = Some(formatted);

@@ -5,7 +5,10 @@
 
 use std::{collections::HashSet, str::FromStr, sync::Arc};
 
-use k8s_openapi::api::core::v1::{Node, Pod, Service};
+use k8s_openapi::api::{
+    core::v1::{Node, Pod, Service},
+    discovery::v1::EndpointSlice,
+};
 use kube::{ResourceExt, api::ListParams};
 
 use crate::{
@@ -79,6 +82,61 @@ pub fn derive_services(svc: &Service) -> Vec<(i32, i32)> {
     services
 }
 
+/// Where a Service gets its targets from, according to Kubernetes traffic policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeSource {
+    Annotation,
+    ServiceEndpoints,
+    AllNodes,
+}
+
+fn node_source(svc: &Service, dynamic_node_selector: bool) -> NodeSource {
+    if !dynamic_node_selector {
+        NodeSource::Annotation
+    } else if svc
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.external_traffic_policy.as_deref())
+        == Some("Local")
+    {
+        NodeSource::ServiceEndpoints
+    } else {
+        NodeSource::AllNodes
+    }
+}
+
+fn excluded_from_lb(node: &Node) -> bool {
+    node.labels().contains_key(consts::EXCLUDE_FROM_LB_LABEL)
+}
+
+fn node_ready(node: &Node) -> bool {
+    node.status
+        .as_ref()
+        .and_then(|status| status.conditions.as_ref())
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|condition| condition.type_ == "Ready")
+        })
+        .is_some_and(|condition| condition.status == "True")
+}
+
+fn eligible_node(node: &Node) -> bool {
+    !excluded_from_lb(node)
+        && node_ready(node)
+        && node.spec.as_ref().and_then(|spec| spec.unschedulable) != Some(true)
+}
+
+async fn all_eligible_nodes(context: &Arc<CurrentContext>) -> RobotLBResult<Vec<Node>> {
+    let api = kube::Api::<Node>::all(context.client.clone());
+    Ok(api
+        .list(&ListParams::default())
+        .await?
+        .into_iter()
+        .filter(eligible_node)
+        .collect())
+}
+
 /// Discover target nodes for a service.
 ///
 /// This method uses either dynamic node selection (based on pod placement)
@@ -87,10 +145,10 @@ pub async fn discover_target_nodes(
     svc: &Arc<Service>,
     context: &Arc<CurrentContext>,
 ) -> RobotLBResult<Vec<Node>> {
-    if context.config.dynamic_node_selector {
-        get_nodes_dynamically(svc, context).await
-    } else {
-        get_nodes_by_selector(svc, context).await
+    match node_source(svc, context.config.dynamic_node_selector) {
+        NodeSource::Annotation => get_nodes_by_selector(svc, context).await,
+        NodeSource::ServiceEndpoints => get_nodes_dynamically(svc, context).await,
+        NodeSource::AllNodes => all_eligible_nodes(context).await,
     }
 }
 
@@ -119,14 +177,18 @@ async fn get_nodes_dynamically(
 ) -> RobotLBResult<Vec<Node>> {
     let pod_api = kube::Api::<Pod>::namespaced(
         context.client.clone(),
-        svc.namespace().as_deref().map_or_else(
-            || context.client.default_namespace(),
-            std::convert::identity,
-        ),
+        svc.namespace()
+            .as_deref()
+            .unwrap_or_else(|| context.client.default_namespace()),
     );
 
-    let Some(pod_selector) = svc.spec.as_ref().and_then(|spec| spec.selector.clone()) else {
-        return Err(RobotLBError::ServiceWithoutSelector);
+    let Some(pod_selector) = svc
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.selector.clone())
+        .filter(|selector| !selector.is_empty())
+    else {
+        return get_nodes_from_endpoint_slices(svc, context).await;
     };
 
     let label_selector = pod_selector
@@ -152,10 +214,51 @@ async fn get_nodes_dynamically(
         .list(&ListParams::default())
         .await?
         .into_iter()
-        .filter(|node| target_nodes.contains(&node.name_any()))
+        .filter(|node| {
+            target_nodes.contains(&node.name_any()) && !excluded_from_lb(node) && node_ready(node)
+        })
         .collect::<Vec<_>>();
 
     Ok(nodes)
+}
+
+/// Resolve selectorless Services through their ready `EndpointSlice` endpoints.
+/// Some controllers (e.g. `KubeVirt`) manage endpoints without a Service selector.
+async fn get_nodes_from_endpoint_slices(
+    svc: &Arc<Service>,
+    context: &Arc<CurrentContext>,
+) -> RobotLBResult<Vec<Node>> {
+    let namespace = svc
+        .namespace()
+        .unwrap_or_else(|| context.client.default_namespace().to_string());
+    let slices_api = kube::Api::<EndpointSlice>::namespaced(context.client.clone(), &namespace);
+    let slices = slices_api
+        .list(&ListParams {
+            label_selector: Some(format!("kubernetes.io/service-name={}", svc.name_any())),
+            ..Default::default()
+        })
+        .await?;
+    let target_names: HashSet<_> = slices
+        .into_iter()
+        .flat_map(|slice| slice.endpoints)
+        .filter(|endpoint| {
+            endpoint
+                .conditions
+                .as_ref()
+                .and_then(|conditions| conditions.ready)
+                != Some(false)
+        })
+        .filter_map(|endpoint| endpoint.node_name)
+        .collect();
+    let nodes_api = kube::Api::<Node>::all(context.client.clone());
+    Ok(nodes_api
+        .list(&ListParams::default())
+        .await?
+        .into_iter()
+        .filter(|node| {
+            target_names.contains(&node.name_any()) && !excluded_from_lb(node) && node_ready(node)
+        })
+        .collect())
 }
 
 /// Get nodes based on the node selector annotation.
@@ -177,7 +280,9 @@ async fn get_nodes_by_selector(
         .list(&ListParams::default())
         .await?
         .into_iter()
-        .filter(|node| label_filter.check(node.labels()))
+        .filter(|node| {
+            label_filter.check(node.labels()) && !excluded_from_lb(node) && node_ready(node)
+        })
         .collect::<Vec<_>>();
     Ok(nodes)
 }
@@ -187,6 +292,40 @@ mod tests {
     use super::*;
     use crate::test_utils::fixtures::{service_spec, service_with_spec};
     use k8s_openapi::api::core::v1::{NodeAddress, NodeStatus, ServicePort};
+
+    #[test]
+    fn uses_all_nodes_under_cluster_policy() {
+        let svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        assert_eq!(node_source(&svc, true), NodeSource::AllNodes);
+        assert_eq!(node_source(&svc, false), NodeSource::Annotation);
+    }
+
+    #[test]
+    fn uses_endpoints_under_local_policy() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        svc.spec.as_mut().expect("spec").external_traffic_policy = Some("Local".to_string());
+        assert_eq!(node_source(&svc, true), NodeSource::ServiceEndpoints);
+    }
+
+    #[test]
+    fn excludes_marked_or_not_ready_nodes() {
+        let mut node = Node::default();
+        assert!(!eligible_node(&node));
+        node.status = Some(NodeStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::NodeCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        assert!(eligible_node(&node));
+        node.metadata.labels = Some(std::collections::BTreeMap::from([(
+            consts::EXCLUDE_FROM_LB_LABEL.to_string(),
+            String::new(),
+        )]));
+        assert!(!eligible_node(&node));
+    }
 
     #[test]
     fn derive_targets_picks_matching_address_type() {

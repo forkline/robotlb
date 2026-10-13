@@ -9,7 +9,11 @@ mod api;
 mod config;
 mod types;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    time::Duration,
+};
 
 use hcloud::{
     apis::configuration::Configuration as HcloudConfig,
@@ -35,8 +39,10 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 /// in Hetzner Cloud.
 #[derive(Debug)]
 pub struct LoadBalancer {
-    /// Name of the load balancer.
+    /// Requested load balancer name.
     pub name: String,
+    /// Service UID, used as the stable ownership identity in Hetzner.
+    service_uid: String,
     /// Services exposed by the load balancer (`listen_port` -> `target_port`).
     pub services: HashMap<i32, i32>,
     /// Target IPs for the load balancer.
@@ -85,6 +91,7 @@ impl LoadBalancer {
 
         Ok(Self {
             name: parsed.name,
+            service_uid: svc.metadata.uid.clone().unwrap_or_default(),
             private_ip: parsed.private_ip,
             public_interface: parsed.public_interface,
             balancer_type: parsed.balancer_type,
@@ -128,8 +135,10 @@ impl LoadBalancer {
             hcloud_config: self.hcloud_config.clone(),
         };
         let hcloud_balancer = self.get_or_create_hcloud_lb().await?;
-        self.reconcile_algorithm(&hcloud_balancer, &api).await?;
+        // Type changes are the highest-risk mutation; reject them before
+        // modifying the algorithm, network, listeners or targets.
         self.reconcile_lb_type(&hcloud_balancer, &api).await?;
+        self.reconcile_algorithm(&hcloud_balancer, &api).await?;
         self.reconcile_network(&hcloud_balancer).await?;
         self.reconcile_services(&hcloud_balancer, &api).await?;
         self.reconcile_targets(&hcloud_balancer, &api).await?;
@@ -156,9 +165,7 @@ impl LoadBalancer {
                         "Desired service configuration for port {} does not match current configuration. Updating ...",
                         listen_port,
                     );
-                    api.update_service(
-                        hcloud_balancer.id,
-                        UpdateLoadBalancerService {
+                    let desired = UpdateLoadBalancerService {
                             http: None,
                             protocol: Some(
                                 hcloud::models::update_load_balancer_service::Protocol::Tcp,
@@ -178,9 +185,9 @@ impl LoadBalancer {
                                     timeout: Some(self.timeout),
                                 },
                             )),
-                        },
-                    )
-                    .await?;
+                        };
+                    retry_temporary(|| api.update_service(hcloud_balancer.id, desired.clone()))
+                        .await?;
                 }
                 ServiceReconcileAction::Delete { listen_port } => {
                     tracing::info!(
@@ -188,7 +195,7 @@ impl LoadBalancer {
                         listen_port,
                         hcloud_balancer.name,
                     );
-                    api.delete_service(hcloud_balancer.id, listen_port).await?;
+                    retry_temporary(|| api.delete_service(hcloud_balancer.id, listen_port)).await?;
                 }
                 ServiceReconcileAction::Add {
                     listen_port,
@@ -198,26 +205,24 @@ impl LoadBalancer {
                         "Found missing service. Adding service that listens for port {}",
                         listen_port
                     );
-                    api.add_service(
-                        hcloud_balancer.id,
-                        LoadBalancerService {
+                    let desired = LoadBalancerService {
+                        http: None,
+                        listen_port,
+                        destination_port,
+                        protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
+                        proxyprotocol: self.proxy_mode,
+                        health_check: Box::new(LoadBalancerServiceHealthCheck {
                             http: None,
-                            listen_port,
-                            destination_port,
-                            protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
-                            proxyprotocol: self.proxy_mode,
-                            health_check: Box::new(LoadBalancerServiceHealthCheck {
-                                http: None,
-                                interval: self.check_interval,
-                                port: destination_port,
-                                protocol:
-                                    hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
-                                retries: self.retries,
-                                timeout: self.timeout,
-                            }),
-                        },
-                    )
-                    .await?;
+                            interval: self.check_interval,
+                            port: destination_port,
+                            protocol:
+                                hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
+                            retries: self.retries,
+                            timeout: self.timeout,
+                        }),
+                    };
+                    retry_temporary(|| api.add_service(hcloud_balancer.id, desired.clone()))
+                        .await?;
                 }
             }
         }
@@ -238,11 +243,19 @@ impl LoadBalancer {
             match action {
                 TargetReconcileAction::Remove { target_ip } => {
                     tracing::info!("Removing target {}", target_ip);
-                    api.remove_target(hcloud_balancer.id, target_ip).await?;
+                    retry_temporary(|| api.remove_target(hcloud_balancer.id, target_ip.clone()))
+                        .await?;
                 }
                 TargetReconcileAction::Add { target_ip } => {
                     tracing::info!("Adding target {}", target_ip);
-                    api.add_target(hcloud_balancer.id, target_ip).await?;
+                    match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone()))
+                        .await
+                    {
+                        Err(error) if error.target_already_defined() => {
+                            tracing::debug!("Target was already added in an earlier attempt");
+                        }
+                        result => result?,
+                    }
                 }
             }
         }
@@ -264,7 +277,7 @@ impl LoadBalancer {
                 hcloud_balancer.algorithm,
                 algorithm
             );
-            api.change_algorithm(hcloud_balancer.id, algorithm).await?;
+            retry_temporary(|| api.change_algorithm(hcloud_balancer.id, algorithm.clone())).await?;
         }
         Ok(())
     }
@@ -281,7 +294,7 @@ impl LoadBalancer {
                 hcloud_balancer.load_balancer_type.name,
                 balancer_type
             );
-            api.change_type(hcloud_balancer.id, balancer_type).await?;
+            retry_temporary(|| api.change_type(hcloud_balancer.id, balancer_type.clone())).await?;
         }
         Ok(())
     }
@@ -346,6 +359,8 @@ impl LoadBalancer {
     ) -> Vec<TargetReconcileAction> {
         let mut actions = Vec::new();
 
+        // Capacity is validated before any Hetzner mutation. Never silently drop
+        // eligible nodes to fit a smaller balancer type.
         let desired_targets: HashSet<String> =
             self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         let current_targets: HashSet<String> = hcloud_balancer
@@ -424,12 +439,14 @@ impl LoadBalancer {
 
         if !is_attached && let Some(network_id) = desired_network {
             tracing::info!("Attaching balancer to network {}", network_id);
-            api::attach_to_network(
-                &self.hcloud_config,
-                hcloud_balancer.id,
-                network_id,
-                self.private_ip.clone(),
-            )
+            retry_temporary(|| {
+                api::attach_to_network(
+                    &self.hcloud_config,
+                    hcloud_balancer.id,
+                    network_id,
+                    self.private_ip.clone(),
+                )
+            })
             .await?;
         }
         Ok(())
@@ -458,8 +475,10 @@ impl LoadBalancer {
             }
 
             tracing::info!("Detaching balancer from network {}", private_net_id);
-            api::detach_from_network(&self.hcloud_config, hcloud_balancer.id, private_net_id)
-                .await?;
+            retry_temporary(|| {
+                api::detach_from_network(&self.hcloud_config, hcloud_balancer.id, private_net_id)
+            })
+            .await?;
         }
 
         Ok(is_attached)
@@ -471,59 +490,124 @@ impl LoadBalancer {
             .is_none_or(|desired_ip| desired_ip == current_ip)
     }
 
-    /// Cleanup the load balancer.
-    ///
-    /// This method will remove all the services and targets from the
-    /// load balancer.
+    /// Delete only a balancer carrying this Service's ownership label.
+    /// A mutable name can never authorize deletion.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the Hetzner Cloud API call fails.
+    /// Returns errors from Hetzner Cloud.
     pub async fn cleanup(&self) -> RobotLBResult<()> {
-        let Some(hcloud_balancer) = api::get_load_balancer(&self.hcloud_config, &self.name).await?
+        let Some(lb) = api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await?
         else {
             return Ok(());
         };
-        for service in &hcloud_balancer.services {
-            tracing::info!(
-                "Deleting service that listens for port {} from load-balancer {}",
-                service.listen_port,
-                hcloud_balancer.name,
-            );
-            api::delete_service(&self.hcloud_config, hcloud_balancer.id, service.listen_port)
-                .await?;
+        api::delete_load_balancer(&self.hcloud_config, lb.id).await
+    }
+
+    /// Release without parsing annotations: malformed config cannot block deletion.
+    ///
+    /// # Errors
+    /// Returns errors from Hetzner Cloud or a missing Service UID.
+    pub async fn cleanup_service(svc: &Service, context: &CurrentContext) -> RobotLBResult<()> {
+        let uid = svc
+            .metadata
+            .uid
+            .as_deref()
+            .ok_or(RobotLBError::SkipService)?;
+        let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await? else {
+            return Ok(());
+        };
+        api::delete_load_balancer(&context.hcloud_config, lb.id).await
+    }
+
+    /// Existing resources must have the matching Service UID label.
+    /// IP targets and mutable names are never used as proof of ownership.
+    async fn get_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+        api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await
+    }
+
+    /// Reject an oversized configuration before creating or modifying an LB.
+    fn validate_capacity(
+        &self,
+        lb_type: &hcloud::models::LoadBalancerType,
+        existing: Option<&hcloud::models::LoadBalancer>,
+    ) -> RobotLBResult<()> {
+        let max_targets = usize::try_from(lb_type.max_targets).map_err(|_| {
+            RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Invalid target capacity reported for LB type {}",
+                lb_type.name
+            ))
+        })?;
+        let max_services = usize::try_from(lb_type.max_services).map_err(|_| {
+            RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Invalid listener capacity reported for LB type {}",
+                lb_type.name
+            ))
+        })?;
+        if max_targets == 0 || max_services == 0 {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB type {} has unavailable capacity limits",
+                lb_type.name
+            )));
         }
-        for target in &hcloud_balancer.targets {
-            if let Some(target_ip) = target.ip.clone() {
-                tracing::info!("Removing target {}", target_ip.ip);
-                api::remove_target(&self.hcloud_config, hcloud_balancer.id, *target_ip).await?;
-            }
+
+        let targets = self
+            .targets
+            .iter()
+            .map(|ip| normalize_ip(ip))
+            .collect::<HashSet<_>>()
+            .len();
+        let listeners = self.services.len();
+        if targets > max_targets || listeners > max_services {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB type {} supports at most {max_targets} targets and {max_services} listeners, but Service requires {targets} targets and {listeners} listeners; no changes applied",
+                lb_type.name
+            )));
         }
-        api::delete_load_balancer(&self.hcloud_config, hcloud_balancer.id).await?;
+
+        // Do not remove healthy existing targets merely to permit a downgrade.
+        if let Some(existing) = existing
+            && existing.load_balancer_type.name != lb_type.name
+            && (existing.targets.len() > max_targets || existing.services.len() > max_services)
+        {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Cannot change existing LB {} to {}: it currently has {} targets and {} listeners, exceeding the requested type's capacity ({max_targets} targets, {max_services} listeners); no changes applied",
+                existing.name,
+                lb_type.name,
+                existing.targets.len(),
+                existing.services.len()
+            )));
+        }
         Ok(())
     }
 
-    /// Get the load balancer from Hetzner Cloud.
-    ///
-    /// This method will try to find the load balancer with the name
-    /// specified in the `LoadBalancer` struct.
-    ///
-    /// The method might return an error if the load balancer is not found
-    /// or if there are multiple load balancers with the same name.
-    async fn get_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
-        api::get_load_balancer(&self.hcloud_config, &self.name).await
-    }
-
-    /// Get or create the load balancer in Hetzner Cloud.
-    ///
-    /// This method will try to find the load balancer with the name
-    /// specified in the `LoadBalancer` struct. If the load balancer
-    /// is not found, the method will create a new load balancer
-    /// with the specified configuration in service's annotations.
+    /// Get an owned LB or create a new one after validating capacity and name.
     async fn get_or_create_hcloud_lb(&self) -> RobotLBResult<hcloud::models::LoadBalancer> {
-        let hcloud_lb = self.get_hcloud_lb().await?;
-        if let Some(balancer) = hcloud_lb {
-            return Ok(balancer);
+        let existing = self.get_hcloud_lb().await?;
+        // Reuse capacity data on an unchanged type; querying Hetzner's catalog
+        // is required only for creation or type changes.
+        if let Some(lb) = existing.as_ref()
+            && lb.load_balancer_type.name == self.balancer_type
+            && lb.load_balancer_type.max_targets > 0
+            && lb.load_balancer_type.max_services > 0
+        {
+            self.validate_capacity(&lb.load_balancer_type, existing.as_ref())?;
+        } else {
+            let lb_type =
+                api::get_load_balancer_type(&self.hcloud_config, &self.balancer_type).await?;
+            self.validate_capacity(&lb_type, existing.as_ref())?;
+        }
+        if let Some(lb) = existing {
+            return Ok(lb);
+        }
+
+        if api::get_load_balancer(&self.hcloud_config, &self.name)
+            .await?
+            .is_some()
+        {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB name {} is already in use by an unowned resource; refusing to adopt or modify it",
+                self.name
+            )));
         }
 
         api::create_load_balancer(
@@ -533,6 +617,7 @@ impl LoadBalancer {
             &self.balancer_type,
             self.algorithm.clone(),
             self.public_interface,
+            &self.service_uid,
         )
         .await
     }
@@ -548,8 +633,13 @@ impl LoadBalancer {
             return Ok(None);
         };
         let response = api::list_networks(&self.hcloud_config, Some(network_name.clone())).await?;
+        let networks: Vec<_> = response
+            .networks
+            .into_iter()
+            .filter(|network| network.name == network_name)
+            .collect();
 
-        if response.networks.len() > 1 {
+        if networks.len() > 1 {
             tracing::warn!(
                 "Found more than one network with name {}, skipping",
                 network_name
@@ -558,15 +648,32 @@ impl LoadBalancer {
                 "Found more than one network with name {network_name}"
             )));
         }
-        if response.networks.is_empty() {
+        if networks.is_empty() {
             tracing::warn!("Network with name {} not found", network_name);
             return Err(RobotLBError::HCloudError(format!(
                 "Network with name {network_name} not found"
             )));
         }
 
-        Ok(response.networks.into_iter().next())
+        Ok(networks.into_iter().next())
     }
+}
+
+/// Retry temporary Hetzner conflicts without treating permanent errors or 429s as transient.
+async fn retry_temporary<T, F, Fut>(mut operation: F) -> RobotLBResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RobotLBResult<T>>,
+{
+    for attempt in 0..=2_u64 {
+        match operation().await {
+            Err(error) if error.is_transient_hcloud() && attempt < 2 => {
+                tokio::time::sleep(Duration::from_secs(attempt + 1)).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("all retry paths return on the final attempt")
 }
 
 #[cfg(test)]
@@ -575,6 +682,45 @@ mod tests {
     use async_trait::async_trait;
     use hcloud::apis::configuration::Configuration as HcloudConfig;
     use std::sync::Mutex;
+
+    #[test]
+    fn capacity_validation_rejects_oversized_configuration() {
+        let mut lb = test_load_balancer();
+        lb.targets = (1..=26).map(|i| format!("192.0.2.{i}")).collect();
+        let lb_type = hcloud::models::LoadBalancerType {
+            name: "lb11".to_string(),
+            max_targets: 25,
+            max_services: 5,
+            ..Default::default()
+        };
+        assert!(matches!(
+            lb.validate_capacity(&lb_type, None),
+            Err(RobotLBError::InvalidLoadBalancerConfiguration(_))
+        ));
+        lb.targets.pop();
+        assert!(lb.validate_capacity(&lb_type, None).is_ok());
+    }
+
+    #[test]
+    fn capacity_validation_never_shrinks_existing_lb_implicitly() {
+        let lb = test_load_balancer();
+        let mut current = hcloud::models::LoadBalancer {
+            name: "existing".to_string(),
+            ..Default::default()
+        };
+        current.load_balancer_type.name = "lb21".to_string();
+        current.targets = vec![hcloud::models::LoadBalancerTarget::default(); 26];
+        let desired = hcloud::models::LoadBalancerType {
+            name: "lb11".to_string(),
+            max_targets: 25,
+            max_services: 5,
+            ..Default::default()
+        };
+        assert!(matches!(
+            lb.validate_capacity(&desired, Some(&current)),
+            Err(RobotLBError::InvalidLoadBalancerConfiguration(_))
+        ));
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum ApiCall {
@@ -709,6 +855,7 @@ mod tests {
     fn test_load_balancer() -> LoadBalancer {
         LoadBalancer {
             name: "svc-name".to_string(),
+            service_uid: "test-uid".to_string(),
             services: HashMap::new(),
             targets: vec![],
             private_ip: None,

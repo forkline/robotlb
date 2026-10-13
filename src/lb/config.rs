@@ -65,7 +65,24 @@ pub fn parse_load_balancer_config(
         .annotations()
         .get(consts::LB_NAME_ANNOTATION)
         .cloned()
-        .unwrap_or_else(|| svc.name_any());
+        .unwrap_or_else(|| {
+            format!(
+                "{}.{}",
+                svc.name_any(),
+                svc.namespace().unwrap_or_else(|| "default".to_string())
+            )
+        });
+
+    if name.is_empty() {
+        return Err(RobotLBError::Generic(
+            "robotlb/balancer must not be empty".to_string(),
+        ));
+    }
+    if network_name.as_deref() == Some("") {
+        return Err(RobotLBError::Generic(
+            "robotlb/lb-network must not be empty".to_string(),
+        ));
+    }
 
     let private_ip = svc
         .annotations()
@@ -181,7 +198,7 @@ mod tests {
 
         let parsed = parse_load_balancer_config(&svc, &config).expect("parse should succeed");
 
-        assert_eq!(parsed.name, "svc-name");
+        assert_eq!(parsed.name, "svc-name.default");
         assert_eq!(parsed.retries, 3);
         assert_eq!(parsed.timeout, 10);
         assert_eq!(parsed.check_interval, 15);
@@ -190,6 +207,27 @@ mod tests {
         assert_eq!(parsed.network_name.as_deref(), Some("default-net"));
         assert!(!parsed.proxy_mode);
         assert!(parsed.public_interface);
+    }
+
+    #[test]
+    fn namespace_is_part_of_default_balancer_name() {
+        let config = base_config();
+        let mut svc = service_with_annotations([]);
+        svc.metadata.namespace = Some("production".to_string());
+        let parsed = parse_load_balancer_config(&svc, &config).expect("valid config");
+        assert_eq!(parsed.name, "svc-name.production");
+    }
+
+    #[test]
+    fn rejects_empty_balancer_or_network_name() {
+        let config = base_config();
+        for (annotation, value) in [
+            (consts::LB_NAME_ANNOTATION, ""),
+            (consts::LB_NETWORK_ANNOTATION, ""),
+        ] {
+            let svc = service_with_annotations([(annotation, value)]);
+            assert!(parse_load_balancer_config(&svc, &config).is_err());
+        }
     }
 
     #[test]

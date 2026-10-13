@@ -52,6 +52,7 @@ pub mod lb;
 pub mod metrics;
 pub mod otel_tracing;
 pub mod prometheus_exporter;
+pub mod rate_limit;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -69,12 +70,14 @@ pub struct CurrentContext {
     pub is_leader: Arc<AtomicBool>,
     /// Metrics instance.
     pub metrics: Arc<Metrics>,
+    /// Hetzner project-wide API throttle shared across all Services.
+    pub rate_limit: Arc<rate_limit::RateLimitGate>,
 }
 
 impl CurrentContext {
     /// Create a new context.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         client: kube::Client,
         config: OperatorConfig,
         hcloud_config: HCloudConfig,
@@ -87,6 +90,7 @@ impl CurrentContext {
             hcloud_config,
             is_leader,
             metrics,
+            rate_limit: Arc::default(),
         }
     }
 }

@@ -21,7 +21,7 @@ opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = { version = "0.31", features = ["trace", "grpc-tonic"] }
 opentelemetry-semantic-conventions = "0.31"
-tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "signal", "net", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6.6", features = ["util"] }
 tracing = "0.1.40"
