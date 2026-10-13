@@ -9,7 +9,7 @@ use kube::ResourceExt;
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub(crate) struct DesiredLoadBalancer {
+pub struct DesiredLoadBalancer {
     config: ParsedLoadBalancerConfig,
     service_uid: String,
     targets: Vec<String>,
@@ -26,7 +26,7 @@ impl DesiredLoadBalancer {
         })
     }
 
-    pub(crate) fn ip_type(&self) -> &'static str {
+    pub(crate) const fn ip_type(&self) -> &'static str {
         if self.config.network_name.is_some() {
             "InternalIP"
         } else {
@@ -68,15 +68,16 @@ impl DesiredLoadBalancer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use crate::test_utils::fixtures::{service_spec, service_with_spec};
+    use clap::Parser;
 
     #[test]
     fn desired_backends_are_deterministic_and_do_not_require_api_credentials() {
         let svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
-        let mut desired = DesiredLoadBalancer::from_service(&svc, &OperatorConfig::parse_from([
-            "robotlb", "--hcloud-token", "dummy-token",
-        ]))
+        let mut desired = DesiredLoadBalancer::from_service(
+            &svc,
+            &OperatorConfig::parse_from(["robotlb", "--hcloud-token", "dummy-token"]),
+        )
         .expect("valid defaults");
         assert_eq!(desired.ip_type(), "ExternalIP");
         desired.add_service(443, 30443);

@@ -6,10 +6,11 @@ use super::{
     ensure_service_is_supported, patch_ingress_status,
 };
 use crate::{
-    lb::DesiredLoadBalancer,
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
-    finalizers, memo,
+    finalizers,
+    lb::{DesiredLoadBalancer, LoadBalancer},
+    memo,
     metrics::ReconcileTimer,
 };
 use k8s_openapi::api::core::v1::Service;
@@ -331,11 +332,10 @@ mod policy_tests {
     #[test]
     fn deleting_managed_service_always_enters_cleanup() {
         let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
-        svc.metadata.deletion_timestamp = Some(
-            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        svc.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                 k8s_openapi::jiff::Timestamp::now(),
-            )
-        );
+            ));
         assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
     }
 
@@ -350,17 +350,19 @@ mod policy_tests {
             assert!(should_reset_failure_backoff(&Ok(outcome)));
         }
         for reason in [PendingReason::RateLimited, PendingReason::Provisioning] {
-            let outcome = ReconcileOutcome::Deferred(
-                reason,
-                Action::requeue(Duration::from_secs(15)),
-            );
+            let outcome =
+                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert!(!outcome.was_successful());
             assert!(!should_reset_failure_backoff(&Ok(outcome)));
-            assert_eq!(
-                outcome.into_action(),
-                Action::requeue(Duration::from_secs(15)),
-            );
         }
+        let deferred = ReconcileOutcome::Deferred(
+            PendingReason::RateLimited,
+            Action::requeue(Duration::from_secs(15)),
+        );
+        assert_eq!(
+            deferred.into_action(),
+            Action::requeue(Duration::from_secs(15)),
+        );
     }
 
     #[test]

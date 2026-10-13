@@ -1029,8 +1029,12 @@ mod tests {
         assert_eq!(
             api.calls(),
             vec![
-                ApiCall::RemoveTarget { ip: "10.0.0.3".into() },
-                ApiCall::AddTarget { ip: "10.0.0.1".into() },
+                ApiCall::RemoveTarget {
+                    ip: "10.0.0.3".into()
+                },
+                ApiCall::AddTarget {
+                    ip: "10.0.0.1".into()
+                },
             ],
         );
 
@@ -1040,7 +1044,9 @@ mod tests {
         lb.reconcile_targets(&after_removal, &api).await.unwrap();
         assert_eq!(
             api.calls().last(),
-            Some(&ApiCall::AddTarget { ip: "10.0.0.1".into() }),
+            Some(&ApiCall::AddTarget {
+                ip: "10.0.0.1".into()
+            }),
         );
         assert_eq!(api.calls().len(), 3);
     }
