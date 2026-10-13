@@ -135,8 +135,10 @@ impl LoadBalancer {
             hcloud_config: self.hcloud_config.clone(),
         };
         let hcloud_balancer = self.get_or_create_hcloud_lb().await?;
-        self.reconcile_algorithm(&hcloud_balancer, &api).await?;
+        // Type changes are the highest-risk mutation; reject them before
+        // modifying the algorithm, network, listeners or targets.
         self.reconcile_lb_type(&hcloud_balancer, &api).await?;
+        self.reconcile_algorithm(&hcloud_balancer, &api).await?;
         self.reconcile_network(&hcloud_balancer).await?;
         self.reconcile_services(&hcloud_balancer, &api).await?;
         self.reconcile_targets(&hcloud_balancer, &api).await?;
