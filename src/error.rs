@@ -104,7 +104,7 @@ impl RobotLBError {
     pub fn is_rate_limited(&self) -> bool {
         match self {
             Self::HCloudLBAttachToNetworkError(e) => is_rate_limit(e),
-            Self::HCloudLBDetachFromNetworkError(e) => is_rate_limit(e),
+            Self::HcloudLBDetachFromNetworkError(e) => is_rate_limit(e),
             Self::HcloudLBAddTargetError(e) => is_rate_limit(e),
             Self::HcloudLBRemoveTargetError(e) => is_rate_limit(e),
             Self::HcloudLBAddServiceError(e) => is_rate_limit(e),
