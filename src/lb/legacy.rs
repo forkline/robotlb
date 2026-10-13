@@ -300,7 +300,6 @@ mod tests {
 
     #[test]
     fn only_discards_empty_uid_owned_0_7_replacements() {
-        let proof = LegacyOwnership::from_service(&service(), &config()).unwrap();
         let mut replacement = balancer();
         replacement
             .labels
