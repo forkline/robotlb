@@ -31,7 +31,10 @@ pub enum RobotLBError {
     #[error("Invalid load balancer configuration: {0}")]
     InvalidLoadBalancerConfiguration(String),
     #[error("Cannot list Hetzner load balancer types: {0}")]
-    HCloudListLoadBalancerTypesError(#[from] hcloud::apis::Error<hcloud::apis::load_balancer_types_api::ListLoadBalancerTypesError>),
+    HCloudListLoadBalancerTypesError(
+        #[from]
+        hcloud::apis::Error<hcloud::apis::load_balancer_types_api::ListLoadBalancerTypesError>,
+    ),
     #[error("Kube error: {0}")]
     KubeError(#[from] kube::Error),
     #[error("Unknown load balancing algorithm")]
