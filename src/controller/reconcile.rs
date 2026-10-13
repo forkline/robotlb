@@ -31,7 +31,7 @@ pub(super) enum ReconcileOutcome {
     Deferred(PendingReason, Action),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum PendingReason {
     RateLimited,
     Provisioning,
@@ -353,15 +353,27 @@ mod policy_tests {
             let outcome =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert!(!outcome.was_successful());
-            assert!(!should_reset_failure_backoff(&Ok(outcome)));
+            assert_eq!(outcome.into_action(), Action::requeue(Duration::from_secs(15)));
+            assert!(!should_reset_failure_backoff(&Ok(ReconcileOutcome::Deferred(
+                reason,
+                Action::requeue(Duration::from_secs(15)),
+            ))));
         }
-        let deferred = ReconcileOutcome::Deferred(
-            PendingReason::RateLimited,
-            Action::requeue(Duration::from_secs(15)),
-        );
+    }
+
+    #[test]
+    fn ignored_service_is_not_reported_as_a_retryable_failure() {
+        let ignored: RobotLBResult<ReconcileOutcome> = Err(RobotLBError::SkipService);
+        assert!(should_reset_failure_backoff(&ignored));
         assert_eq!(
-            deferred.into_action(),
-            Action::requeue(Duration::from_secs(15)),
+            error_action(
+                &RobotLBError::SkipService,
+                &crate::rate_limit::RateLimitGate::default(),
+                &crate::backoff::ErrorBackoff::default(),
+                std::time::Instant::now(),
+                "default/svc",
+            ),
+            Action::await_change(),
         );
     }
 
