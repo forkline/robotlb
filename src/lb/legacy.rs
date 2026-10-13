@@ -17,7 +17,7 @@ pub(super) struct LegacyOwnership {
 }
 
 impl LegacyOwnership {
-    /// Version 0.6.0 left a RobotLB finalizer and published the actual LB IP.
+    /// Version 0.6.0 left a `RobotLB` finalizer and published the actual LB IP.
     /// Both must still be present before we can claim the unlabelled resource.
     pub(super) fn from_service(svc: &Service, config: &OperatorConfig) -> Option<Self> {
         if !finalizers::check(svc) {
@@ -167,11 +167,11 @@ mod tests {
         assert!(LegacyOwnership::from_service(&svc, &config()).is_none());
 
         let mut svc = service();
-        svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap().ingress =
-            Some(vec![LoadBalancerIngress {
-                hostname: Some("unverified.example".into()),
-                ..Default::default()
-            }]);
+        let lb_status = svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap();
+        lb_status.ingress = Some(vec![LoadBalancerIngress {
+            hostname: Some("unverified.example".into()),
+            ..Default::default()
+        }]);
         assert!(LegacyOwnership::from_service(&svc, &config()).is_none());
     }
 
@@ -187,20 +187,22 @@ mod tests {
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
 
         let mut lb = balancer();
-        lb.labels.insert(consts::LB_OWNER_LABEL.into(), "other-uid".into());
+        lb.labels
+            .insert(consts::LB_OWNER_LABEL.into(), "other-uid".into());
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
-        lb.labels.insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
+        lb.labels
+            .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
     }
 
     #[test]
     fn matches_private_only_load_balancers_and_requires_all_ingress_ips() {
         let mut svc = service();
-        svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap().ingress =
-            Some(vec![LoadBalancerIngress {
-                ip: Some("10.0.0.10".into()),
-                ..Default::default()
-            }]);
+        let lb_status = svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap();
+        lb_status.ingress = Some(vec![LoadBalancerIngress {
+            ip: Some("10.0.0.10".into()),
+            ..Default::default()
+        }]);
         let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
         let mut lb = balancer();
         lb.private_net = vec![hcloud::models::LoadBalancerPrivateNet {
@@ -209,11 +211,11 @@ mod tests {
         }];
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_some());
 
-        svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap().ingress.as_mut().unwrap()
-            .push(LoadBalancerIngress {
-                ip: Some("198.51.100.99".into()),
-                ..Default::default()
-            });
+        let lb_status = svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap();
+        lb_status.ingress.as_mut().unwrap().push(LoadBalancerIngress {
+            ip: Some("198.51.100.99".into()),
+            ..Default::default()
+        });
         let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
     }
@@ -224,7 +226,11 @@ mod tests {
         config.cluster_name = Some("prod".into());
         let proof = LegacyOwnership::from_service(&service(), &config).unwrap();
         assert_eq!(proof.names(), &["prod.web.default", "web.default"]);
-        assert!(proof.labels_for_adoption(&balancer(), "service-uid").is_some());
+        assert!(
+            proof
+                .labels_for_adoption(&balancer(), "service-uid")
+                .is_some()
+        );
 
         let mut svc = service();
         svc.metadata.annotations = Some(std::collections::BTreeMap::from([(
@@ -233,6 +239,10 @@ mod tests {
         )]));
         let proof = LegacyOwnership::from_service(&svc, &config).unwrap();
         assert_eq!(proof.names(), &["custom"]);
-        assert!(proof.labels_for_adoption(&balancer(), "service-uid").is_none());
+        assert!(
+            proof
+                .labels_for_adoption(&balancer(), "service-uid")
+                .is_none()
+        );
     }
 }
