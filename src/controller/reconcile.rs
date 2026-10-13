@@ -353,11 +353,13 @@ mod policy_tests {
             let outcome =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert!(!outcome.was_successful());
-            assert_eq!(outcome.into_action(), Action::requeue(Duration::from_secs(15)));
-            assert!(!should_reset_failure_backoff(&Ok(ReconcileOutcome::Deferred(
-                reason,
-                Action::requeue(Duration::from_secs(15)),
-            ))));
+            assert_eq!(
+                outcome.into_action(),
+                Action::requeue(Duration::from_secs(15))
+            );
+            assert!(!should_reset_failure_backoff(&Ok(
+                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)),)
+            )));
         }
     }
 
