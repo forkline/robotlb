@@ -137,6 +137,10 @@ pub enum RobotLBError {
     HcloudLBGetError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::GetLoadBalancerError>,
     ),
+    #[error("Cannot update load balancer labels. Reason: {}", describe_hcloud(.0))]
+    HcloudLBReplaceError(
+        #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::ReplaceLoadBalancerError>,
+    ),
     #[error("Cannot update service. Reason: {}", describe_hcloud(.0))]
     HcloudLBUpdateServiceError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::UpdateServiceError>,
@@ -179,6 +183,7 @@ impl RobotLBError {
             Self::HcloudLBCreateError(e) => is_rate_limit(e),
             Self::HcloudLBDeleteError(e) => is_rate_limit(e),
             Self::HcloudLBGetError(e) => is_rate_limit(e),
+            Self::HcloudLBReplaceError(e) => is_rate_limit(e),
             Self::HcloudLBUpdateServiceError(e) => is_rate_limit(e),
             Self::HcloudLBChangeType(e) => is_rate_limit(e),
             Self::HcloudLBChangeAlgorithm(e) => is_rate_limit(e),
@@ -220,6 +225,7 @@ impl RobotLBError {
             Self::HcloudLBRemoveTargetError(e) => is_transient_hcloud(e),
             Self::HcloudLBAddServiceError(e) => is_transient_hcloud(e),
             Self::HcloudLBRemoveServiceError(e) => is_transient_hcloud(e),
+            Self::HcloudLBReplaceError(e) => is_transient_hcloud(e),
             Self::HcloudLBUpdateServiceError(e) => is_transient_hcloud(e),
             Self::HcloudLBChangeType(e) => is_transient_hcloud(e),
             Self::HcloudLBChangeAlgorithm(e) => is_transient_hcloud(e),
