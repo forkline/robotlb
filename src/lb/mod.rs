@@ -41,8 +41,6 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 pub struct LoadBalancer {
     /// Requested load balancer name.
     pub name: String,
-    /// Pre-upgrade name for conservative adoption without changing existing IPs.
-    legacy_name: Option<String>,
     /// Service UID, used as the stable ownership identity in Hetzner.
     service_uid: String,
     /// Services exposed by the load balancer (`listen_port` -> `target_port`).
@@ -93,12 +91,6 @@ impl LoadBalancer {
 
         Ok(Self {
             name: parsed.name,
-            legacy_name: (!svc
-                .metadata
-                .annotations
-                .as_ref()
-                .is_some_and(|a| a.contains_key(crate::consts::LB_NAME_ANNOTATION)))
-            .then(|| svc.metadata.name.clone().unwrap_or_default()),
             service_uid: svc.metadata.uid.clone().unwrap_or_default(),
             private_ip: parsed.private_ip,
             public_interface: parsed.public_interface,
@@ -365,28 +357,10 @@ impl LoadBalancer {
     ) -> Vec<TargetReconcileAction> {
         let mut actions = Vec::new();
 
-        // Keep the target set stable even if there are more eligible nodes than the
-        // Hetzner balancer type can accommodate. Unordered HashSet iteration would
-        // otherwise cause targets to churn on each reconciliation.
-        let max_targets =
-            usize::try_from(hcloud_balancer.load_balancer_type.max_targets).unwrap_or(usize::MAX);
-        let max_targets = if max_targets == 0 {
-            usize::MAX
-        } else {
-            max_targets
-        };
-        let mut ordered: Vec<_> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
-        ordered.sort_unstable();
-        ordered.dedup();
-        if ordered.len() > max_targets {
-            tracing::warn!(
-                selected = ordered.len(),
-                max_targets,
-                "Truncating load balancer targets to the Hetzner type limit"
-            );
-            ordered.truncate(max_targets);
-        }
-        let desired_targets: HashSet<String> = ordered.into_iter().collect();
+        // Capacity is validated before any Hetzner mutation. Never silently drop
+        // eligible nodes to fit a smaller balancer type.
+        let desired_targets: HashSet<String> =
+            self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         let current_targets: HashSet<String> = hcloud_balancer
             .targets
             .iter()
@@ -543,67 +517,84 @@ impl LoadBalancer {
         api::delete_load_balancer(&context.hcloud_config, lb.id).await
     }
 
-    /// Retrieve an owned LB or safely adopt an unlabelled pre-upgrade balancer.
+    /// Existing resources must have the matching Service UID label.
+    /// IP targets and mutable names are never used as proof of ownership.
     async fn get_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
-        if let Some(lb) =
-            api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await?
-        {
-            return Ok(Some(lb));
-        }
-
-        let mut candidates = Vec::new();
-        if let Some(legacy) = &self.legacy_name
-            && legacy != &self.name
-        {
-            candidates.push((legacy.as_str(), true));
-        }
-        candidates.push((self.name.as_str(), false));
-
-        for (name, legacy) in candidates {
-            let Some(lb) = api::get_load_balancer(&self.hcloud_config, name).await? else {
-                continue;
-            };
-            if let Some(owner) = lb.labels.get(crate::consts::LB_OWNER_LABEL) {
-                if owner == &self.service_uid {
-                    return Ok(Some(lb));
-                }
-                if legacy {
-                    continue;
-                }
-                return Err(RobotLBError::HCloudError(format!(
-                    "Balancer {name} belongs to a different Service UID: {owner}"
-                )));
-            }
-            // Names alone are not proof of ownership.
-            if can_adopt_legacy(&lb, &self.targets) {
-                return api::adopt_load_balancer(&self.hcloud_config, &lb, &self.service_uid)
-                    .await
-                    .map(Some);
-            }
-            if self.targets.is_empty() {
-                return Err(RobotLBError::HCloudError(format!(
-                    "Cannot establish ownership of legacy balancer {name} without target nodes"
-                )));
-            }
-            if !legacy {
-                return Err(RobotLBError::HCloudError(format!(
-                    "Refusing to adopt unrelated or empty balancer {name}"
-                )));
-            }
-        }
-        Ok(None)
+        api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await
     }
 
-    /// Get or create the load balancer in Hetzner Cloud.
-    ///
-    /// This method will try to find the load balancer with the name
-    /// specified in the `LoadBalancer` struct. If the load balancer
-    /// is not found, the method will create a new load balancer
-    /// with the specified configuration in service's annotations.
+    /// Reject an oversized configuration before creating or modifying an LB.
+    fn validate_capacity(
+        &self,
+        lb_type: &hcloud::models::LoadBalancerType,
+        existing: Option<&hcloud::models::LoadBalancer>,
+    ) -> RobotLBResult<()> {
+        let max_targets = usize::try_from(lb_type.max_targets).map_err(|_| {
+            RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Invalid target capacity reported for LB type {}", lb_type.name
+            ))
+        })?;
+        let max_services = usize::try_from(lb_type.max_services).map_err(|_| {
+            RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Invalid listener capacity reported for LB type {}", lb_type.name
+            ))
+        })?;
+        if max_targets == 0 || max_services == 0 {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB type {} has unavailable capacity limits", lb_type.name
+            )));
+        }
+
+        let targets = self.targets.iter().map(|ip| normalize_ip(ip)).collect::<HashSet<_>>().len();
+        let listeners = self.services.len();
+        if targets > max_targets || listeners > max_services {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB type {} supports at most {max_targets} targets and {max_services} listeners, but Service requires {targets} targets and {listeners} listeners; no changes applied",
+                lb_type.name
+            )));
+        }
+
+        // Do not remove healthy existing targets merely to permit a downgrade.
+        if let Some(existing) = existing
+            && existing.load_balancer_type.name != lb_type.name
+            && (existing.targets.len() > max_targets || existing.services.len() > max_services)
+        {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Cannot change existing LB {} to {}: it currently has {} targets and {} listeners, exceeding the requested type's capacity ({max_targets} targets, {max_services} listeners); no changes applied",
+                existing.name, lb_type.name, existing.targets.len(), existing.services.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Get an owned LB or create a new one after validating capacity and name.
     async fn get_or_create_hcloud_lb(&self) -> RobotLBResult<hcloud::models::LoadBalancer> {
-        let hcloud_lb = self.get_hcloud_lb().await?;
-        if let Some(balancer) = hcloud_lb {
-            return Ok(balancer);
+        let existing = self.get_hcloud_lb().await?;
+        // Reuse capacity data on an unchanged type; querying Hetzner's catalog
+        // is required only for creation or type changes.
+        if let Some(lb) = existing.as_ref()
+            && lb.load_balancer_type.name == self.balancer_type
+            && lb.load_balancer_type.max_targets > 0
+            && lb.load_balancer_type.max_services > 0
+        {
+            self.validate_capacity(&lb.load_balancer_type, existing.as_ref())?;
+        } else {
+            let lb_type =
+                api::get_load_balancer_type(&self.hcloud_config, &self.balancer_type).await?;
+            self.validate_capacity(&lb_type, existing.as_ref())?;
+        }
+        if let Some(lb) = existing {
+            return Ok(lb);
+        }
+
+        if api::get_load_balancer(&self.hcloud_config, &self.name)
+            .await?
+            .is_some()
+        {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "LB name {} is already in use by an unowned resource; refusing to adopt or modify it",
+                self.name
+            )));
         }
 
         api::create_load_balancer(
@@ -672,19 +663,6 @@ where
     unreachable!("all retry paths return on the final attempt")
 }
 
-/// Conservative migration: legacy balancers can be adopted only if they use IP
-/// targets exclusively and have at least one target on this Service's nodes.
-fn can_adopt_legacy(lb: &hcloud::models::LoadBalancer, service_targets: &[String]) -> bool {
-    lb.targets
-        .iter()
-        .all(|target| target.r#type == hcloud::models::load_balancer_target::Type::Ip)
-        && lb.targets.iter().any(|target| {
-            target
-                .ip
-                .as_ref()
-                .is_some_and(|ip| service_targets.contains(&ip.ip))
-        })
-}
 
 #[cfg(test)]
 mod tests {
@@ -694,27 +672,42 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn legacy_adoption_requires_ip_targets_and_node_overlap() {
-        let ip = hcloud::models::LoadBalancerTarget {
-            r#type: hcloud::models::load_balancer_target::Type::Ip,
-            ip: Some(Box::new(hcloud::models::LoadBalancerTargetIp {
-                ip: "192.0.2.10".to_string(),
-            })),
+    fn capacity_validation_rejects_oversized_configuration() {
+        let mut lb = test_load_balancer();
+        lb.targets = (1..=26).map(|i| format!("192.0.2.{i}")).collect();
+        let lb_type = hcloud::models::LoadBalancerType {
+            name: "lb11".to_string(),
+            max_targets: 25,
+            max_services: 5,
             ..Default::default()
         };
-        let desired = vec!["192.0.2.10".to_string()];
-        let mut lb = hcloud::models::LoadBalancer {
-            targets: vec![ip],
+        assert!(matches!(
+            lb.validate_capacity(&lb_type, None),
+            Err(RobotLBError::InvalidLoadBalancerConfiguration(_))
+        ));
+        lb.targets.pop();
+        assert!(lb.validate_capacity(&lb_type, None).is_ok());
+    }
+
+    #[test]
+    fn capacity_validation_never_shrinks_existing_lb_implicitly() {
+        let lb = test_load_balancer();
+        let mut current = hcloud::models::LoadBalancer {
+            name: "existing".to_string(),
             ..Default::default()
         };
-        assert!(can_adopt_legacy(&lb, &desired));
-        assert!(!can_adopt_legacy(&lb, &[]));
-        assert!(!can_adopt_legacy(&lb, &["192.0.2.11".to_string()]));
-        lb.targets.push(hcloud::models::LoadBalancerTarget {
-            r#type: hcloud::models::load_balancer_target::Type::Server,
+        current.load_balancer_type.name = "lb21".to_string();
+        current.targets = vec![hcloud::models::LoadBalancerTarget::default(); 26];
+        let desired = hcloud::models::LoadBalancerType {
+            name: "lb11".to_string(),
+            max_targets: 25,
+            max_services: 5,
             ..Default::default()
-        });
-        assert!(!can_adopt_legacy(&lb, &desired));
+        };
+        assert!(matches!(
+            lb.validate_capacity(&desired, Some(&current)),
+            Err(RobotLBError::InvalidLoadBalancerConfiguration(_))
+        ));
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -850,7 +843,6 @@ mod tests {
     fn test_load_balancer() -> LoadBalancer {
         LoadBalancer {
             name: "svc-name".to_string(),
-            legacy_name: None,
             service_uid: "test-uid".to_string(),
             services: HashMap::new(),
             targets: vec![],
