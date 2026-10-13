@@ -111,11 +111,15 @@ enum ServiceDisposition {
 }
 
 fn classify_service(svc: &Service) -> ServiceDisposition {
-    if svc.meta().deletion_timestamp.is_some()
-        || (finalizers::check(svc) && ensure_service_is_supported(svc).is_err())
-    {
+    let has_finalizer = finalizers::check(svc);
+    let supported = ensure_service_is_supported(svc).is_ok();
+    let deleting = svc.meta().deletion_timestamp.is_some();
+
+    // The finalizer is installed before creating a provider LB. Without it,
+    // this Service has no managed lifecycle to clean up.
+    if has_finalizer && (deleting || !supported) {
         ServiceDisposition::Cleanup
-    } else if ensure_service_is_supported(svc).is_err() {
+    } else if deleting || !supported {
         ServiceDisposition::Ignore
     } else {
         ServiceDisposition::Manage
@@ -336,6 +340,8 @@ mod policy_tests {
             Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                 k8s_openapi::jiff::Timestamp::now(),
             ));
+        assert_eq!(classify_service(&svc), ServiceDisposition::Ignore);
+        svc.metadata.finalizers = Some(vec![consts::FINALIZER_NAME.to_string()]);
         assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
     }
 
