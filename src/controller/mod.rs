@@ -91,6 +91,16 @@ pub async fn reconcile_service(
         return Err(RobotLBError::SkipService);
     }
 
+    // Release resources even if a Service changed its type/class, and even if
+    // configuration annotations have become invalid.
+    if svc.meta().deletion_timestamp.is_some()
+        || (finalizers::check(&svc) && ensure_service_is_supported(&svc).is_err())
+    {
+        LoadBalancer::cleanup_service(&svc, &context).await?;
+        finalizers::remove(context.client.clone(), &svc).await?;
+        return Ok(Action::await_change());
+    }
+
     ensure_service_is_supported(&svc)?;
 
     tracing::info!("Starting service reconcilation");
@@ -102,20 +112,6 @@ pub async fn reconcile_service(
             return Err(e);
         }
     };
-
-    // If the service is being deleted, we need to clean up the resources.
-    if svc.meta().deletion_timestamp.is_some() {
-        tracing::info!("Service deletion detected. Cleaning up resources.");
-        if let Err(e) = lb.cleanup().await {
-            timer.set_failed();
-            return Err(e);
-        }
-        if let Err(e) = finalizers::remove(context.client.clone(), &svc).await {
-            timer.set_failed();
-            return Err(e);
-        }
-        return Ok(Action::await_change());
-    }
 
     // Add finalizer if it's not there yet.
     if !finalizers::check(&svc)

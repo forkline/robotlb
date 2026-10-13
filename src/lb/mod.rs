@@ -35,8 +35,12 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 /// in Hetzner Cloud.
 #[derive(Debug)]
 pub struct LoadBalancer {
-    /// Name of the load balancer.
+    /// Requested load balancer name.
     pub name: String,
+    /// Pre-upgrade name for conservative adoption without changing existing IPs.
+    legacy_name: Option<String>,
+    /// Service UID, used as the stable ownership identity in Hetzner.
+    service_uid: String,
     /// Services exposed by the load balancer (`listen_port` -> `target_port`).
     pub services: HashMap<i32, i32>,
     /// Target IPs for the load balancer.
@@ -85,6 +89,9 @@ impl LoadBalancer {
 
         Ok(Self {
             name: parsed.name,
+            legacy_name: (!svc.metadata.annotations.as_ref().is_some_and(|a| a.contains_key(crate::consts::LB_NAME_ANNOTATION)))
+                .then(|| svc.metadata.name.clone().unwrap_or_default()),
+            service_uid: svc.metadata.uid.clone().unwrap_or_default(),
             private_ip: parsed.private_ip,
             public_interface: parsed.public_interface,
             balancer_type: parsed.balancer_type,
@@ -486,47 +493,70 @@ impl LoadBalancer {
             .is_none_or(|desired_ip| desired_ip == current_ip)
     }
 
-    /// Cleanup the load balancer.
-    ///
-    /// This method will remove all the services and targets from the
-    /// load balancer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the Hetzner Cloud API call fails.
+    /// Delete only a balancer carrying this Service's ownership label.
+    /// A mutable name can never authorize deletion.
     pub async fn cleanup(&self) -> RobotLBResult<()> {
-        let Some(hcloud_balancer) = api::get_load_balancer(&self.hcloud_config, &self.name).await?
-        else {
-            return Ok(());
-        };
-        for service in &hcloud_balancer.services {
-            tracing::info!(
-                "Deleting service that listens for port {} from load-balancer {}",
-                service.listen_port,
-                hcloud_balancer.name,
-            );
-            api::delete_service(&self.hcloud_config, hcloud_balancer.id, service.listen_port)
-                .await?;
-        }
-        for target in &hcloud_balancer.targets {
-            if let Some(target_ip) = target.ip.clone() {
-                tracing::info!("Removing target {}", target_ip.ip);
-                api::remove_target(&self.hcloud_config, hcloud_balancer.id, *target_ip).await?;
-            }
-        }
-        api::delete_load_balancer(&self.hcloud_config, hcloud_balancer.id).await?;
-        Ok(())
+        let Some(lb) = api::get_owned_load_balancer(
+            &self.hcloud_config, &self.service_uid,
+        ).await? else { return Ok(()); };
+        api::delete_load_balancer(&self.hcloud_config, lb.id).await
     }
 
-    /// Get the load balancer from Hetzner Cloud.
-    ///
-    /// This method will try to find the load balancer with the name
-    /// specified in the `LoadBalancer` struct.
-    ///
-    /// The method might return an error if the load balancer is not found
-    /// or if there are multiple load balancers with the same name.
+    /// Release without parsing annotations: malformed config cannot block deletion.
+    pub async fn cleanup_service(svc: &Service, context: &CurrentContext) -> RobotLBResult<()> {
+        let uid = svc.metadata.uid.as_deref().ok_or(RobotLBError::SkipService)?;
+        let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await? else {
+            return Ok(());
+        };
+        api::delete_load_balancer(&context.hcloud_config, lb.id).await
+    }
+
+    /// Retrieve an owned LB or safely adopt an unlabelled pre-upgrade balancer.
     async fn get_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
-        api::get_load_balancer(&self.hcloud_config, &self.name).await
+        if let Some(lb) = api::get_owned_load_balancer(
+            &self.hcloud_config, &self.service_uid,
+        ).await? { return Ok(Some(lb)); }
+
+        let mut candidates = Vec::new();
+        if let Some(legacy) = &self.legacy_name {
+            if legacy != &self.name { candidates.push((legacy.as_str(), true)); }
+        }
+        candidates.push((self.name.as_str(), false));
+
+        for (name, legacy) in candidates {
+            let Some(lb) = api::get_load_balancer(&self.hcloud_config, name).await? else {
+                continue;
+            };
+            if let Some(owner) = lb.labels.get(crate::consts::LB_OWNER_LABEL) {
+                if owner == &self.service_uid { return Ok(Some(lb)); }
+                if legacy { continue; }
+                return Err(RobotLBError::HCloudError(format!(
+                    "Balancer {name} belongs to a different Service UID: {owner}"
+                )));
+            }
+            // Names alone are not ownership evidence. Old robotlb targets were
+            // exclusively IPs, and at least one must match an eligible node.
+            let has_matching_target = lb.targets.iter().any(|target| {
+                target.ip.as_ref().is_some_and(|ip| self.targets.contains(&ip.ip))
+            });
+            let ip_only = lb.targets.iter().all(|target| target.ip.is_some());
+            if ip_only && has_matching_target {
+                return api::adopt_load_balancer(
+                    &self.hcloud_config, &lb, &self.service_uid,
+                ).await.map(Some);
+            }
+            if self.targets.is_empty() {
+                return Err(RobotLBError::HCloudError(format!(
+                    "Cannot establish ownership of legacy balancer {name} without target nodes"
+                )));
+            }
+            if !legacy {
+                return Err(RobotLBError::HCloudError(format!(
+                    "Refusing to adopt unrelated or empty balancer {name}"
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// Get or create the load balancer in Hetzner Cloud.
@@ -548,6 +578,7 @@ impl LoadBalancer {
             &self.balancer_type,
             self.algorithm.clone(),
             self.public_interface,
+            &self.service_uid,
         )
         .await
     }
@@ -729,6 +760,8 @@ mod tests {
     fn test_load_balancer() -> LoadBalancer {
         LoadBalancer {
             name: "svc-name".to_string(),
+            legacy_name: None,
+            service_uid: "test-uid".to_string(),
             services: HashMap::new(),
             targets: vec![],
             private_ip: None,

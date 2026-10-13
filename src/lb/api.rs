@@ -22,7 +22,7 @@ use hcloud::{
     },
 };
 
-use crate::error::{RobotLBError, RobotLBResult};
+use crate::{consts, error::{RobotLBError, RobotLBResult}};
 
 /// Trait for interacting with the Hetzner Cloud Load Balancer API.
 ///
@@ -195,6 +195,49 @@ pub async fn list_load_balancers(
     .await?)
 }
 
+/// Fetch only the balancer labelled with this Service's immutable UID.
+pub async fn get_owned_load_balancer(
+    hcloud_config: &HcloudConfig,
+    uid: &str,
+) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+    if uid.is_empty() { return Err(RobotLBError::SkipService); }
+    let response = hcloud::apis::load_balancers_api::list_load_balancers(
+        hcloud_config,
+        ListLoadBalancersParams {
+            label_selector: Some(format!("{}={uid}", consts::LB_OWNER_LABEL)),
+            ..Default::default()
+        },
+    ).await?;
+    let mut owned: Vec<_> = response.load_balancers.into_iter()
+        .filter(|lb| lb.labels.get(consts::LB_OWNER_LABEL).is_some_and(|owner| owner == uid))
+        .collect();
+    if owned.len() > 1 {
+        return Err(RobotLBError::HCloudError(format!("Multiple balancers owned by UID {uid}")));
+    }
+    Ok(owned.pop())
+}
+
+/// Adopt an unlabelled legacy balancer without changing its public IP or name.
+pub async fn adopt_load_balancer(
+    hcloud_config: &HcloudConfig,
+    lb: &hcloud::models::LoadBalancer,
+    uid: &str,
+) -> RobotLBResult<hcloud::models::LoadBalancer> {
+    let mut labels = lb.labels.clone();
+    labels.insert(consts::LB_OWNER_LABEL.to_string(), uid.to_string());
+    let result = hcloud::apis::load_balancers_api::replace_load_balancer(
+        hcloud_config,
+        hcloud::apis::load_balancers_api::ReplaceLoadBalancerParams {
+            id: lb.id,
+            replace_load_balancer_request: hcloud::models::ReplaceLoadBalancerRequest {
+                labels: Some(labels),
+                name: None,
+            },
+        },
+    ).await.map_err(|err| RobotLBError::HCloudError(format!("Cannot label legacy LB: {err}")))?;
+    Ok(*result.load_balancer)
+}
+
 /// Get a specific load balancer by name.
 pub async fn get_load_balancer(
     hcloud_config: &HcloudConfig,
@@ -223,13 +266,14 @@ pub async fn create_load_balancer(
     balancer_type: &str,
     algorithm: LoadBalancerAlgorithm,
     public_interface: bool,
+    owner_uid: &str,
 ) -> RobotLBResult<hcloud::models::LoadBalancer> {
     let response = hcloud::apis::load_balancers_api::create_load_balancer(
         hcloud_config,
         hcloud::apis::load_balancers_api::CreateLoadBalancerParams {
             create_load_balancer_request: hcloud::models::CreateLoadBalancerRequest {
                 algorithm: Some(Box::new(algorithm)),
-                labels: None,
+                labels: Some(std::collections::HashMap::from([(consts::LB_OWNER_LABEL.to_string(), owner_uid.to_string())])),
                 load_balancer_type: balancer_type.to_string(),
                 location: Some(location.to_string()),
                 name: name.to_string(),

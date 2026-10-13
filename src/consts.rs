@@ -50,6 +50,9 @@ pub const DEFAULT_LB_BALANCER_TYPE: &str = "lb11";
 /// Kubernetes node label excluding the node from external load balancer targets.
 pub const EXCLUDE_FROM_LB_LABEL: &str = "node.kubernetes.io/exclude-from-external-load-balancers";
 
+/// Hetzner label identifying the owning Kubernetes Service UID.
+pub const LB_OWNER_LABEL: &str = "robotlb/service-uid";
+
 /// Finalizer name used to prevent deletion before cleanup.
 pub const FINALIZER_NAME: &str = "robotlb/finalizer";
 /// Load balancer class name for Kubernetes services.

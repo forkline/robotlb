@@ -65,7 +65,7 @@ pub fn parse_load_balancer_config(
         .annotations()
         .get(consts::LB_NAME_ANNOTATION)
         .cloned()
-        .unwrap_or_else(|| svc.name_any());
+        .unwrap_or_else(|| format!("{}.{}", svc.name_any(), svc.namespace().unwrap_or_else(|| "default".to_string())));
 
     if name.is_empty() {
         return Err(RobotLBError::Generic(
@@ -192,7 +192,7 @@ mod tests {
 
         let parsed = parse_load_balancer_config(&svc, &config).expect("parse should succeed");
 
-        assert_eq!(parsed.name, "svc-name");
+        assert_eq!(parsed.name, "svc-name.default");
         assert_eq!(parsed.retries, 3);
         assert_eq!(parsed.timeout, 10);
         assert_eq!(parsed.check_interval, 15);
