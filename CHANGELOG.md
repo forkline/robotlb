@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3](https://github.com/forkline/robotlb/tree/0.7.3) - 2026-10-13
+
+### Added
+
+- helm: Support revision-aware topology spread constraints (#75) ([e382a87](https://github.com/forkline/robotlb/commit/e382a878c3262983fbbca358ffdc82eb6eb4d5a2))
+
 ## [0.7.2](https://github.com/forkline/robotlb/tree/0.7.2) - 2026-10-13
 
 ### Fixed
