@@ -3,6 +3,7 @@
 use super::*;
 use super::events::publish_reconciliation_warning;
 use crate::memo;
+use crate::lb::DesiredLoadBalancer;
 
 /// Whether reconciliation completed or intentionally deferred without applying state.
 /// Deferred attempts must not clear the Service's failure backoff or populate the memo.
@@ -107,13 +108,13 @@ async fn reconcile_service_inner(
 
     tracing::info!("Starting service reconciliation");
 
-    let lb = LoadBalancer::try_from_svc(&svc, &context)?;
+    let desired = DesiredLoadBalancer::from_service(&svc, &context.config)?;
 
     if !finalizers::check(&svc) {
         finalizers::add(context.client.clone(), &svc).await?;
     }
 
-    reconcile_load_balancer(lb, svc, context).await
+    reconcile_load_balancer(desired, svc, context).await
 }
 
 fn service_key(svc: &Service) -> String {
@@ -130,11 +131,11 @@ fn service_key(svc: &Service) -> String {
 ///
 /// Returns an error if node discovery fails, or if the Kubernetes/Hetzner API call fails.
 async fn reconcile_load_balancer(
-    mut lb: LoadBalancer,
+    mut desired: DesiredLoadBalancer,
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
 ) -> RobotLBResult<ReconcileOutcome> {
-    let desired_ip_type = node_ip_type(&lb);
+    let desired_ip_type = desired.ip_type();
 
     let nodes = discover_target_nodes(&svc, &context).await?;
     let desired_targets = derive_targets(nodes, desired_ip_type);
@@ -148,7 +149,8 @@ async fn reconcile_load_balancer(
         ));
     }
 
-    apply_desired_state(&mut lb, desired_targets, desired_services);
+    apply_desired_state(&mut desired, desired_targets, desired_services);
+    let lb = desired.into_load_balancer(context.hcloud_config.clone());
 
     let uid = svc.uid();
     let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
