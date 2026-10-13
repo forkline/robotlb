@@ -1,7 +1,7 @@
 //! Typed desired state, independent of Kubernetes and Hetzner API clients.
 //! A Service is parsed once, then target discovery fills in its effective backends.
 
-use super::{LoadBalancer, types::ParsedLoadBalancerConfig};
+use super::{LoadBalancer, legacy::LegacyOwnership, types::ParsedLoadBalancerConfig};
 use crate::{config::OperatorConfig, error::RobotLBResult};
 use hcloud::apis::configuration::Configuration as HcloudConfig;
 use k8s_openapi::api::core::v1::Service;
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub struct DesiredLoadBalancer {
     config: ParsedLoadBalancerConfig,
     service_uid: String,
+    legacy_ownership: Option<LegacyOwnership>,
     targets: Vec<String>,
     services: HashMap<i32, i32>,
 }
@@ -21,6 +22,7 @@ impl DesiredLoadBalancer {
         Ok(Self {
             config: super::parse_load_balancer_config(svc, config)?,
             service_uid: svc.uid().unwrap_or_default(),
+            legacy_ownership: LegacyOwnership::from_service(svc, config),
             targets: Vec::new(),
             services: HashMap::new(),
         })
@@ -48,6 +50,7 @@ impl DesiredLoadBalancer {
         LoadBalancer {
             name: c.name,
             service_uid: self.service_uid,
+            legacy_ownership: self.legacy_ownership,
             services: self.services,
             targets: self.targets,
             private_ip: c.private_ip,
