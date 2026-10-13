@@ -33,8 +33,8 @@ use std::{
 
 use clap::Parser;
 use hcloud::apis::configuration::Configuration as HCloudConfig;
-use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
 use kube::runtime::events::{Recorder, Reporter};
+use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -95,10 +95,13 @@ impl CurrentContext {
         is_leader: Arc<AtomicBool>,
         metrics: Arc<Metrics>,
     ) -> Self {
-        let recorder = Recorder::new(client.clone(), Reporter {
-            controller: "robotlb".to_string(),
-            instance: None,
-        });
+        let recorder = Recorder::new(
+            client.clone(),
+            Reporter {
+                controller: "robotlb".to_string(),
+                instance: None,
+            },
+        );
         Self {
             client,
             config,
