@@ -72,6 +72,8 @@ pub struct CurrentContext {
     pub metrics: Arc<Metrics>,
     /// Hetzner project-wide API throttle shared across all Services.
     pub rate_limit: Arc<rate_limit::RateLimitGate>,
+    /// Suppress repeated identical Kubernetes Warning Events.
+    pub(crate) event_throttle: Arc<controller::EventThrottle>,
 }
 
 impl CurrentContext {
@@ -91,6 +93,7 @@ impl CurrentContext {
             is_leader,
             metrics,
             rate_limit: Arc::default(),
+            event_throttle: Arc::default(),
         }
     }
 }
