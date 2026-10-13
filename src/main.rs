@@ -33,6 +33,7 @@ use std::{
 
 use clap::Parser;
 use hcloud::apis::configuration::Configuration as HCloudConfig;
+use kube::runtime::events::{Recorder, Reporter};
 use kube_leader_election::{LeaseLock, LeaseLockParams, LeaseLockResult};
 use tokio_util::sync::CancellationToken;
 
@@ -72,6 +73,8 @@ pub struct CurrentContext {
     pub is_leader: Arc<AtomicBool>,
     /// Metrics instance.
     pub metrics: Arc<Metrics>,
+    /// Shared Kubernetes Event recorder.
+    pub recorder: Recorder,
     /// Hetzner project-wide API throttle shared across all Services.
     pub rate_limit: Arc<rate_limit::RateLimitGate>,
     /// Failure backoff scoped to each Service UID.
@@ -92,12 +95,20 @@ impl CurrentContext {
         is_leader: Arc<AtomicBool>,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let recorder = Recorder::new(
+            client.clone(),
+            Reporter {
+                controller: "robotlb".to_string(),
+                instance: None,
+            },
+        );
         Self {
             client,
             config,
             hcloud_config,
             is_leader,
             metrics,
+            recorder,
             rate_limit: Arc::default(),
             error_backoff: Arc::default(),
             memo: Arc::default(),
