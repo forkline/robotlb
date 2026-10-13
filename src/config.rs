@@ -13,6 +13,10 @@ pub struct OperatorConfig {
     #[arg(short = 't', long, env = "ROBOTLB_HCLOUD_TOKEN")]
     pub hcloud_token: String,
 
+    /// Optional cluster prefix for default LB names when sharing a Hetzner project.
+    #[arg(long, env = "ROBOTLB_CLUSTER_NAME", value_parser = crate::lb::parse_cluster_name)]
+    pub cluster_name: Option<String>,
+
     /// Default network to use for load balancers.
     /// If not set, then only network from the service annotation will be used.
     #[arg(long, env = "ROBOTLB_DEFAULT_NETWORK", default_value = None)]
@@ -140,6 +144,7 @@ mod tests {
             .expect("config should parse");
 
         assert_eq!(config.hcloud_token, "token");
+        assert_eq!(config.cluster_name, None);
         assert_eq!(config.default_network, None);
         assert!(config.dynamic_node_selector);
         assert_eq!(config.default_lb_retries, 3);
@@ -167,6 +172,8 @@ mod tests {
             "robotlb",
             "--hcloud-token",
             "token",
+            "--cluster-name",
+            "prod",
             "--default-network",
             "prod-net",
             "--default-lb-retries",
@@ -204,6 +211,7 @@ mod tests {
         .expect("config should parse");
 
         assert_eq!(config.default_network.as_deref(), Some("prod-net"));
+        assert_eq!(config.cluster_name.as_deref(), Some("prod"));
         assert!(config.dynamic_node_selector);
         assert_eq!(config.default_lb_retries, 5);
         assert_eq!(config.default_lb_timeout, 7);
