@@ -350,16 +350,16 @@ mod policy_tests {
             assert!(should_reset_failure_backoff(&Ok(outcome)));
         }
         for reason in [PendingReason::RateLimited, PendingReason::Provisioning] {
-            let outcome =
+            let pending =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
-            assert!(!outcome.was_successful());
+            assert!(!pending.was_successful());
+            assert!(!should_reset_failure_backoff(&Ok(pending)));
+            let scheduled =
+                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert_eq!(
-                outcome.into_action(),
+                scheduled.into_action(),
                 Action::requeue(Duration::from_secs(15))
             );
-            assert!(!should_reset_failure_backoff(&Ok(
-                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)),)
-            )));
         }
     }
 
