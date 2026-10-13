@@ -1,4 +1,4 @@
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::core::v1::{LoadBalancerIngress, Service};
 use kube::{Resource, ResourceExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -11,29 +11,71 @@ use std::{
 /// watch event that changed nothing robotlb acts on costs no Hetzner requests.
 #[derive(Default)]
 pub struct ReconcileMemo {
-    entries: Mutex<HashMap<String, (u64, Instant)>>,
+    entries: Mutex<HashMap<String, (u64, Instant, Vec<LoadBalancerIngress>)>>,
+    pending_ingress: Mutex<HashMap<String, (u64, Instant)>>,
 }
 
 impl ReconcileMemo {
     /// How long the recorded state stays valid, when the service is still in it.
-    pub fn unchanged(&self, uid: &str, fingerprint: u64, now: Instant) -> Option<Duration> {
-        let (recorded, until) = *self
+    pub fn unchanged(
+        &self,
+        uid: &str,
+        fingerprint: u64,
+        now: Instant,
+    ) -> Option<(Duration, Vec<LoadBalancerIngress>)> {
+        let (recorded, until, ingress) = self
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(uid)?;
+            .get(uid)?
+            .clone();
         if recorded != fingerprint {
             return None;
         }
-        Some(until.saturating_duration_since(now)).filter(|left| !left.is_zero())
+        let left = until.saturating_duration_since(now);
+        (!left.is_zero()).then_some((left, ingress))
     }
 
-    /// Keep the state for `valid_for`, the time until the reconcile is due anyway.
-    pub fn record(&self, uid: &str, fingerprint: u64, now: Instant, valid_for: Duration) {
+    /// Keep the successful desired state and ingress status for `valid_for`.
+    pub fn record(
+        &self,
+        uid: &str,
+        fingerprint: u64,
+        now: Instant,
+        valid_for: Duration,
+        ingress: Vec<LoadBalancerIngress>,
+    ) {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(uid.to_string(), (fingerprint, now + valid_for));
+            .insert(uid.to_string(), (fingerprint, now + valid_for, ingress));
+    }
+
+    /// An incomplete ingress is normal briefly; escalate only after the deadline.
+    /// Changes to the effective configuration restart the deadline.
+    pub fn missing_ingress_overdue(
+        &self,
+        uid: &str,
+        fingerprint: u64,
+        now: Instant,
+        deadline: Duration,
+    ) -> bool {
+        let mut pending = self
+            .pending_ingress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let entry = pending.entry(uid.to_string()).or_insert((fingerprint, now));
+        if entry.0 != fingerprint {
+            *entry = (fingerprint, now);
+        }
+        now.saturating_duration_since(entry.1) >= deadline
+    }
+
+    pub fn clear_pending(&self, uid: &str) {
+        self.pending_ingress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(uid);
     }
 
     /// Drop the entry of a service after a failed reconcile, or once robotlb no
@@ -41,10 +83,13 @@ impl ReconcileMemo {
     pub fn settle(&self, svc: &Service, succeeded: bool) {
         let serves = svc.meta().deletion_timestamp.is_none()
             && crate::controller::ensure_service_is_supported(svc).is_ok();
-        if !(succeeded && serves)
-            && let Some(uid) = svc.uid()
-        {
-            self.forget(&uid);
+        if let Some(uid) = svc.uid() {
+            if !(succeeded && serves) {
+                self.forget(&uid);
+            }
+            if !serves {
+                self.clear_pending(&uid);
+            }
         }
     }
 
@@ -147,10 +192,10 @@ mod tests {
     fn an_unchanged_service_is_skipped_until_the_resync() {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
-        memo.record("uid-1", 7, start, RESYNC);
+        memo.record("uid-1", 7, start, RESYNC, vec![]);
         assert_eq!(
             memo.unchanged("uid-1", 7, start + Duration::from_secs(100)),
-            Some(Duration::from_secs(200))
+            Some((Duration::from_secs(200), vec![]))
         );
         assert_eq!(memo.unchanged("uid-1", 7, start + RESYNC), None);
         assert_eq!(
@@ -164,10 +209,10 @@ mod tests {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
         let retry = Duration::from_secs(30);
-        memo.record("uid-1", 7, start, retry);
+        memo.record("uid-1", 7, start, retry, vec![]);
         assert_eq!(
             memo.unchanged("uid-1", 7, start + Duration::from_secs(10)),
-            Some(Duration::from_secs(20))
+            Some((Duration::from_secs(20), vec![]))
         );
         assert_eq!(memo.unchanged("uid-1", 7, start + retry), None);
     }
@@ -177,16 +222,54 @@ mod tests {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
         assert_eq!(memo.unchanged("uid-1", 7, start), None);
-        memo.record("uid-1", 7, start, RESYNC);
+        memo.record("uid-1", 7, start, RESYNC, vec![]);
         assert_eq!(memo.unchanged("uid-1", 8, start), None);
         assert_eq!(memo.unchanged("uid-2", 7, start), None);
+    }
+
+    #[test]
+    fn cached_ingress_supports_status_repair_without_hcloud() {
+        let memo = ReconcileMemo::default();
+        let start = Instant::now();
+        let ingress = vec![LoadBalancerIngress {
+            ip: Some("192.0.2.10".to_string()),
+            ..Default::default()
+        }];
+        memo.record("uid-1", 7, start, RESYNC, ingress.clone());
+        assert_eq!(
+            memo.unchanged("uid-1", 7, start),
+            Some((RESYNC, ingress))
+        );
+    }
+
+    #[test]
+    fn pending_ingress_times_out_and_resets_on_change_or_recovery() {
+        let memo = ReconcileMemo::default();
+        let start = Instant::now();
+        let timeout = Duration::from_secs(180);
+        assert!(!memo.missing_ingress_overdue("uid-1", 7, start, timeout));
+        assert!(!memo.missing_ingress_overdue(
+            "uid-1",
+            7,
+            start + Duration::from_secs(179),
+            timeout
+        ));
+        assert!(memo.missing_ingress_overdue("uid-1", 7, start + timeout, timeout));
+        assert!(!memo.missing_ingress_overdue("uid-1", 8, start + timeout, timeout));
+        memo.clear_pending("uid-1");
+        assert!(!memo.missing_ingress_overdue(
+            "uid-1",
+            8,
+            start + timeout + Duration::from_secs(1),
+            timeout
+        ));
     }
 
     #[test]
     fn a_forgotten_service_is_reconciled() {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
-        memo.record("uid-1", 7, start, RESYNC);
+        memo.record("uid-1", 7, start, RESYNC, vec![]);
         memo.forget("uid-1");
         assert_eq!(memo.unchanged("uid-1", 7, start), None);
     }
@@ -195,15 +278,15 @@ mod tests {
     fn a_new_record_restarts_the_resync() {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
-        memo.record("uid-1", 7, start, RESYNC);
-        memo.record("uid-1", 8, start + RESYNC, RESYNC);
-        assert_eq!(memo.unchanged("uid-1", 8, start + RESYNC), Some(RESYNC));
+        memo.record("uid-1", 7, start, RESYNC, vec![]);
+        memo.record("uid-1", 8, start + RESYNC, RESYNC, vec![]);
+        assert_eq!(memo.unchanged("uid-1", 8, start + RESYNC), Some((RESYNC, vec![])));
     }
 
     fn settled(svc: &Service, succeeded: bool) -> bool {
         let memo = ReconcileMemo::default();
         let start = Instant::now();
-        memo.record("uid-1", 7, start, RESYNC);
+        memo.record("uid-1", 7, start, RESYNC, vec![]);
         memo.settle(svc, succeeded);
         memo.unchanged("uid-1", 7, start).is_some()
     }
