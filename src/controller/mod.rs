@@ -92,15 +92,25 @@ pub async fn reconcile_service(
     context: Arc<CurrentContext>,
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
+    let result = reconcile_service_inner(svc.clone(), context.clone()).await;
+    if let Err(error) = &result {
+        if !matches!(error, RobotLBError::SkipService) {
+            timer.set_failed();
+            publish_reconciliation_warning(&svc, &context, error).await;
+        }
+    }
+    result
+}
 
+async fn reconcile_service_inner(
+    svc: Arc<Service>,
+    context: Arc<CurrentContext>,
+) -> RobotLBResult<Action> {
     if !context.is_leader.load(Ordering::Relaxed) {
         return Err(RobotLBError::SkipService);
     }
     if let Some(delay) = context.rate_limit.remaining(std::time::Instant::now()) {
-        tracing::debug!(
-            ?delay,
-            "Hetzner API rate limit pause; skipping reconciliation"
-        );
+        tracing::debug!(?delay, "Hetzner API rate limit pause; skipping reconciliation");
         return Ok(Action::requeue(delay));
     }
 
@@ -116,39 +126,20 @@ pub async fn reconcile_service(
 
     ensure_service_is_supported(&svc)?;
 
-    tracing::info!("Starting service reconcilation");
+    tracing::info!("Starting service reconciliation");
 
-    let lb = match LoadBalancer::try_from_svc(&svc, &context) {
-        Ok(lb) => lb,
-        Err(e) => {
-            timer.set_failed();
-            return Err(e);
-        }
-    };
+    let lb = LoadBalancer::try_from_svc(&svc, &context)?;
 
-    // Add finalizer if it's not there yet.
-    if !finalizers::check(&svc)
-        && let Err(e) = finalizers::add(context.client.clone(), &svc).await
-    {
-        timer.set_failed();
-        return Err(e);
+    if !finalizers::check(&svc) {
+        finalizers::add(context.client.clone(), &svc).await?;
     }
 
-    // Based on the service type, we will reconcile the load balancer.
-    match reconcile_load_balancer(lb, svc.clone(), context.clone()).await {
-        Ok(action) => Ok(action),
-        Err(e) => {
-            timer.set_failed();
-            if matches!(e, RobotLBError::InvalidLoadBalancerConfiguration(_)) {
-                publish_invalid_configuration_warning(&svc, &context, &e).await;
-            }
-            Err(e)
-        }
-    }
+    reconcile_load_balancer(lb, svc, context).await
 }
 
-/// Emit a Warning Event while keeping reconciliation errors independent of Event RBAC.
-async fn publish_invalid_configuration_warning(
+/// Display the last error on the Service without leaking Hetzner API credentials.
+/// Event publishing errors must not hide the original reconciliation failure.
+async fn publish_reconciliation_warning(
     svc: &Service,
     context: &CurrentContext,
     error: &RobotLBError,
@@ -163,16 +154,38 @@ async fn publish_invalid_configuration_warning(
     let event = Event {
         type_: EventType::Warning,
         action: "Reconcile".to_string(),
-        reason: "InvalidLoadBalancerConfiguration".to_string(),
-        note: Some(error.to_string()),
+        reason: warning_reason(error).to_string(),
+        note: Some(event_note(error, &context.config.hcloud_token)),
         secondary: None,
     };
     if let Err(publish_error) = recorder.publish(&event, &svc.object_ref(&())).await {
         tracing::warn!(
             error = %publish_error,
-            "Cannot publish invalid configuration Warning Event"
+            "Cannot publish reconciliation Warning Event"
         );
     }
+}
+
+const fn warning_reason(error: &RobotLBError) -> &'static str {
+    if matches!(error, RobotLBError::InvalidLoadBalancerConfiguration(_)) {
+        "InvalidLoadBalancerConfiguration"
+    } else {
+        "SyncLoadBalancerFailed"
+    }
+}
+
+/// Kubernetes Events cap notes at 1024 bytes, not characters.
+fn event_note(error: &RobotLBError, token: &str) -> String {
+    const MAX_NOTE_BYTES: usize = 1024;
+    let mut note = crate::error::redact(&error.to_string(), token);
+    if note.len() > MAX_NOTE_BYTES {
+        let mut end = MAX_NOTE_BYTES;
+        while !note.is_char_boundary(end) {
+            end -= 1;
+        }
+        note.truncate(end);
+    }
+    note
 }
 
 /// Reconcile the `LoadBalancer` type of service.
@@ -264,6 +277,7 @@ pub async fn run(
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     let controller_shutdown = shutdown.clone();
+    let hcloud_token = context.config.hcloud_token.clone();
     Controller::new(
         kube::Api::<Service>::all(kube_client),
         watcher::Config::default(),
@@ -275,20 +289,31 @@ pub async fn run(
     )
     .run(reconcile_service, on_error, context)
     .take_until(controller_shutdown.cancelled())
-    .for_each(|reconcilation_result| async move {
-        match reconcilation_result {
-            Ok((service, _action)) => {
-                tracing::info!("Reconcilation of a service {} was successful", service.name);
-            }
-            Err(err) => match err {
-                kube::runtime::controller::Error::ReconcilerFailed(
+    .for_each(|reconciliation_result| {
+        let token = hcloud_token.clone();
+        async move {
+            match reconciliation_result {
+                Ok((service, _action)) => {
+                    tracing::info!("Reconciliation of a service {} was successful", service.name);
+                }
+                Err(kube::runtime::controller::Error::ReconcilerFailed(
                     RobotLBError::SkipService,
                     _,
-                ) => {}
-                _ => {
-                    tracing::error!("Error reconciling service: {:#?}", err);
+                )) => {}
+                Err(kube::runtime::controller::Error::ReconcilerFailed(error, service)) => {
+                    tracing::error!(
+                        service = %service,
+                        error = %crate::error::redact(&error.to_string(), &token),
+                        "Service reconciliation failed"
+                    );
                 }
-            },
+                Err(error) => {
+                    tracing::error!(
+                        error = %crate::error::redact(&error.to_string(), &token),
+                        "Controller reconciliation failed"
+                    );
+                }
+            }
         }
     })
     .await;
@@ -321,6 +346,35 @@ mod tests {
     fn service_filter_accepts_default_robotlb_class() {
         let svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
         assert!(ensure_service_is_supported(&svc).is_ok());
+    }
+
+    #[test]
+    fn all_errors_are_reported_except_skipped_services() {
+        assert_eq!(
+            warning_reason(&RobotLBError::InvalidLoadBalancerConfiguration(
+                "too many targets".to_string()
+            )),
+            "InvalidLoadBalancerConfiguration"
+        );
+        assert_eq!(
+            warning_reason(&RobotLBError::HCloudError("error".to_string())),
+            "SyncLoadBalancerFailed"
+        );
+    }
+
+    #[test]
+    fn warning_notes_redact_hetzner_token_and_fit_event_limit() {
+        let token = "0123456789abcdef";
+        let error = RobotLBError::HCloudError(format!(
+            "invalid token {} {}",
+            &token[..12],
+            "é".repeat(600)
+        ));
+        let note = event_note(&error, token);
+        assert!(note.contains("[REDACTED]"));
+        assert!(!note.contains(&token[..12]));
+        assert!(note.len() <= 1024);
+        assert!(note.is_char_boundary(note.len()));
     }
 
     #[test]
