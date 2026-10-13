@@ -27,6 +27,15 @@ pub struct OperatorConfig {
     #[arg(long, env = "ROBOTLB_DYNAMIC_NODE_SELECTOR", default_value = "true")]
     pub dynamic_node_selector: bool,
 
+    /// Maximum seconds between full Hetzner drift checks, even with no changes.
+    #[arg(
+        long,
+        env = "ROBOTLB_RESYNC_INTERVAL",
+        default_value = "300",
+        value_parser = clap::value_parser!(u64).range(1..=31_536_000)
+    )]
+    pub resync_interval: u64,
+
     /// Default load balancer healthcheck retries cound.
     #[arg(long, env = "ROBOTLB_DEFAULT_LB_RETRIES", default_value = "3")]
     pub default_lb_retries: i32,
@@ -147,6 +156,7 @@ mod tests {
         assert_eq!(config.cluster_name, None);
         assert_eq!(config.default_network, None);
         assert!(config.dynamic_node_selector);
+        assert_eq!(config.resync_interval, 300);
         assert_eq!(config.default_lb_retries, 3);
         assert_eq!(config.default_lb_timeout, 10);
         assert_eq!(config.default_lb_interval, 15);
@@ -174,6 +184,8 @@ mod tests {
             "token",
             "--cluster-name",
             "prod",
+            "--resync-interval",
+            "120",
             "--default-network",
             "prod-net",
             "--default-lb-retries",
@@ -211,6 +223,7 @@ mod tests {
         .expect("config should parse");
 
         assert_eq!(config.default_network.as_deref(), Some("prod-net"));
+        assert_eq!(config.resync_interval, 120);
         assert_eq!(config.cluster_name.as_deref(), Some("prod"));
         assert!(config.dynamic_node_selector);
         assert_eq!(config.default_lb_retries, 5);
