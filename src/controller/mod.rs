@@ -91,7 +91,10 @@ pub async fn reconcile_service(
         return Err(RobotLBError::SkipService);
     }
     if let Some(delay) = context.rate_limit.remaining(std::time::Instant::now()) {
-        tracing::debug!(?delay, "Hetzner API rate limit pause; skipping reconciliation");
+        tracing::debug!(
+            ?delay,
+            "Hetzner API rate limit pause; skipping reconciliation"
+        );
         return Ok(Action::requeue(delay));
     }
 
@@ -182,7 +185,10 @@ pub async fn reconcile_load_balancer(
 pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
     if error.is_rate_limited() {
         let delay = context.rate_limit.on_rate_limit(std::time::Instant::now());
-        tracing::warn!(?delay, "Hetzner API rate limit reached; pausing all Services");
+        tracing::warn!(
+            ?delay,
+            "Hetzner API rate limit reached; pausing all Services"
+        );
         return Action::requeue(delay);
     }
     action_for_error(error)

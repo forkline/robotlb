@@ -177,7 +177,9 @@ async fn get_nodes_dynamically(
 ) -> RobotLBResult<Vec<Node>> {
     let pod_api = kube::Api::<Pod>::namespaced(
         context.client.clone(),
-        svc.namespace().as_deref().unwrap_or_else(|| context.client.default_namespace()),
+        svc.namespace()
+            .as_deref()
+            .unwrap_or_else(|| context.client.default_namespace()),
     );
 
     let Some(pod_selector) = svc

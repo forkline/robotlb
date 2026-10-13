@@ -75,8 +75,7 @@ pub async fn patch_ingress_status(
         .and_then(|status| status.load_balancer.as_ref())
         .and_then(|balancer| balancer.ingress.as_ref());
     if current.is_some_and(|entries| {
-        k8s_openapi::serde_json::to_value(entries)
-            .is_ok_and(|value| value == desired)
+        k8s_openapi::serde_json::to_value(entries).is_ok_and(|value| value == desired)
     }) {
         return Ok(());
     }
