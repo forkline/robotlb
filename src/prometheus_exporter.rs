@@ -1,6 +1,6 @@
 use std::{
     fmt::Write as FmtWrite,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
@@ -28,11 +28,9 @@ impl PrometheusExporter {
         }
     }
 
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn get_metrics(&self) -> Option<String> {
-        self.data.lock().unwrap().clone()
+        self.data.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn format_metrics(metrics: &ResourceMetrics) -> String {
@@ -198,7 +196,7 @@ impl PushMetricExporter for PrometheusExporter {
     #[allow(clippy::unused_async_trait_impl)] // Required by the SDK's async exporter trait.
     async fn export(&self, metrics: &ResourceMetrics) -> Result<(), OTelSdkError> {
         let formatted = Self::format_metrics(metrics);
-        *self.data.lock().unwrap() = Some(formatted);
+        *self.data.lock().unwrap_or_else(PoisonError::into_inner) = Some(formatted);
         Ok(())
     }
 
@@ -221,20 +219,15 @@ impl PushMetricExporter for PrometheusExporter {
 
 static PROMETHEUS_EXPORTER: Mutex<Option<PrometheusExporter>> = Mutex::new(None);
 
-/// # Panics
-/// Panics if the global mutex is poisoned.
 pub fn set_global_exporter(exporter: PrometheusExporter) {
     debug!("Setting global Prometheus exporter");
-    *PROMETHEUS_EXPORTER.lock().unwrap() = Some(exporter);
+    *PROMETHEUS_EXPORTER.lock().unwrap_or_else(PoisonError::into_inner) = Some(exporter);
 }
 
 /// # Errors
 /// Returns an error string if the Prometheus exporter is not initialized or if no metrics are available yet.
-///
-/// # Panics
-/// Panics if the global mutex is poisoned.
 pub fn format_prometheus_metrics() -> Result<String, String> {
-    let exporter_guard = PROMETHEUS_EXPORTER.lock().unwrap();
+    let exporter_guard = PROMETHEUS_EXPORTER.lock().unwrap_or_else(PoisonError::into_inner);
 
     exporter_guard.as_ref().map_or_else(
         || Err("Prometheus exporter not initialized".to_string()),

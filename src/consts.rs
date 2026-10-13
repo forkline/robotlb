@@ -7,8 +7,6 @@
 pub const LB_NAME_ANNOTATION: &str = "robotlb/balancer";
 /// Annotation key for custom node selector.
 pub const LB_NODE_SELECTOR_ANNOTATION: &str = "robotlb/node-selector";
-/// Annotation key for specifying node IP.
-pub const LB_NODE_IP_ANNOTATION: &str = "robotlb/node-ip";
 
 // LB config
 /// Annotation key for health check interval (seconds).
@@ -32,20 +30,6 @@ pub const LB_LOCATION_ANNOTATION: &str = "robotlb/lb-location";
 pub const LB_ALGORITHM_ANNOTATION: &str = "robotlb/lb-algorithm";
 /// Annotation key for load balancer type.
 pub const LB_BALANCER_TYPE_ANNOTATION: &str = "robotlb/balancer-type";
-
-/// Default number of health check retries.
-pub const DEFAULT_LB_RETRIES: i32 = 3;
-/// Default health check timeout in seconds.
-pub const DEFAULT_LB_TIMEOUT: i32 = 10;
-/// Default health check interval in seconds.
-pub const DEFAULT_LB_INTERVAL: i32 = 15;
-
-/// Default load balancer location.
-pub const DEFAULT_LB_LOCATION: &str = "hel1";
-/// Default load balancing algorithm.
-pub const DEFAULT_LB_ALGORITHM: &str = "least-connections";
-/// Default load balancer type.
-pub const DEFAULT_LB_BALANCER_TYPE: &str = "lb11";
 
 /// Kubernetes node label excluding the node from external load balancer targets.
 pub const EXCLUDE_FROM_LB_LABEL: &str = "node.kubernetes.io/exclude-from-external-load-balancers";
