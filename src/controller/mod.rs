@@ -16,17 +16,17 @@ use std::{
     time::Duration,
 };
 
-use futures::StreamExt;
 use crate::memo;
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
     Resource, ResourceExt,
     runtime::{
-        Controller,
+        Controller, WatchStreamExt,
         controller::Action,
         events::{Event, EventType, Recorder, Reporter},
         reflector::ObjectRef,
-        watcher, WatchStreamExt,
+        watcher,
     },
 };
 
@@ -42,7 +42,6 @@ pub(crate) use nodes::{
     apply_desired_state, derive_services, derive_targets, discover_target_nodes, node_ip_type,
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
-
 
 /// Check if a service is supported by robotlb.
 ///
@@ -150,9 +149,8 @@ async fn reconcile_service_inner(
 }
 
 fn service_key(svc: &Service) -> String {
-    svc.uid().unwrap_or_else(|| {
-        format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())
-    })
+    svc.uid()
+        .unwrap_or_else(|| format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any()))
 }
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
@@ -252,10 +250,11 @@ pub async fn reconcile_load_balancer(
 
     let uid = svc.uid();
     let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
-    if let Some(wait) = uid
-        .as_deref()
-        .and_then(|uid| context.memo.unchanged(uid, fingerprint, std::time::Instant::now()))
-    {
+    if let Some(wait) = uid.as_deref().and_then(|uid| {
+        context
+            .memo
+            .unchanged(uid, fingerprint, std::time::Instant::now())
+    }) {
         tracing::debug!("No effective configuration change; skipping Hetzner API");
         return Ok(Action::requeue(wait));
     }
@@ -272,7 +271,9 @@ pub async fn reconcile_load_balancer(
 
     let resync = Duration::from_secs(context.config.resync_interval);
     if let Some(uid) = uid {
-        context.memo.record(&uid, fingerprint, std::time::Instant::now(), resync);
+        context
+            .memo
+            .record(&uid, fingerprint, std::time::Instant::now(), resync);
     }
     Ok(Action::requeue(resync))
 }
@@ -280,8 +281,13 @@ pub async fn reconcile_load_balancer(
 /// Schedule failures independently, but pause the entire project on rate limits.
 #[allow(clippy::needless_pass_by_value)]
 pub fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
-    error_action(error, &context.rate_limit, &context.error_backoff,
-        std::time::Instant::now(), &service_key(&svc))
+    error_action(
+        error,
+        &context.rate_limit,
+        &context.error_backoff,
+        std::time::Instant::now(),
+        &service_key(&svc),
+    )
 }
 
 fn error_action(
@@ -295,7 +301,10 @@ fn error_action(
         RobotLBError::SkipService => Action::await_change(),
         error if error.is_rate_limited() => {
             let delay = rate_limit.on_rate_limit(now);
-            tracing::warn!(?delay, "Hetzner API rate limit reached; pausing all Services");
+            tracing::warn!(
+                ?delay,
+                "Hetzner API rate limit reached; pausing all Services"
+            );
             Action::requeue(delay)
         }
         _ => Action::requeue(backoff.on_failure(service, now)),
@@ -320,9 +329,7 @@ pub fn map_endpoint_slice_to_service(
 
 /// Wake all Services only when target-relevant Node state changes.
 /// Periodic resync still detects out-of-band Hetzner changes.
-fn node_change_signals(
-    client: kube::Client,
-) -> impl futures::Stream<Item = ()> + Send + Sync {
+fn node_change_signals(client: kube::Client) -> impl futures::Stream<Item = ()> + Send + Sync {
     let (sender, receiver) = futures::channel::mpsc::unbounded();
     tokio::spawn(async move {
         let mut changes = node_changes::NodeChanges::default();
@@ -464,13 +471,21 @@ mod tests {
         let backoff = crate::backoff::ErrorBackoff::default();
         let now = std::time::Instant::now();
         let error = RobotLBError::HCloudError("test".to_string());
-        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/web"),
-            Action::requeue(Duration::from_secs(5)));
-        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/web"),
-            Action::requeue(Duration::from_secs(10)));
-        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/api"),
-            Action::requeue(Duration::from_secs(5)));
-        assert_eq!(error_action(&RobotLBError::SkipService, &gate, &backoff, now, "shop/web"),
-            Action::await_change());
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(5))
+        );
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(10))
+        );
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/api"),
+            Action::requeue(Duration::from_secs(5))
+        );
+        assert_eq!(
+            error_action(&RobotLBError::SkipService, &gate, &backoff, now, "shop/web"),
+            Action::await_change()
+        );
     }
 }
