@@ -31,7 +31,7 @@ pub(super) enum ReconcileOutcome {
     Deferred(PendingReason, Action),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum PendingReason {
     RateLimited,
     Provisioning,
@@ -101,6 +101,27 @@ pub(super) async fn reconcile_service(
     result.map(ReconcileOutcome::into_action)
 }
 
+/// Pure lifecycle classification: a previously managed Service must be cleaned up
+/// even if its type or loadBalancerClass was changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceDisposition {
+    Ignore,
+    Cleanup,
+    Manage,
+}
+
+fn classify_service(svc: &Service) -> ServiceDisposition {
+    if svc.meta().deletion_timestamp.is_some()
+        || (finalizers::check(svc) && ensure_service_is_supported(svc).is_err())
+    {
+        ServiceDisposition::Cleanup
+    } else if ensure_service_is_supported(svc).is_err() {
+        ServiceDisposition::Ignore
+    } else {
+        ServiceDisposition::Manage
+    }
+}
+
 async fn reconcile_service_inner(
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
@@ -119,17 +140,16 @@ async fn reconcile_service_inner(
         ));
     }
 
-    // Release resources even if a Service changed its type/class, and even if
-    // configuration annotations have become invalid.
-    if svc.meta().deletion_timestamp.is_some()
-        || (finalizers::check(&svc) && ensure_service_is_supported(&svc).is_err())
-    {
-        LoadBalancer::cleanup_service(&svc, &context).await?;
-        finalizers::remove(context.client.clone(), &svc).await?;
-        return Ok(ReconcileOutcome::Deleted(Action::await_change()));
+    // Decide cleanup before trying to parse potentially invalid annotations.
+    match classify_service(&svc) {
+        ServiceDisposition::Cleanup => {
+            LoadBalancer::cleanup_service(&svc, &context).await?;
+            finalizers::remove(context.client.clone(), &svc).await?;
+            return Ok(ReconcileOutcome::Deleted(Action::await_change()));
+        }
+        ServiceDisposition::Ignore => return Err(RobotLBError::SkipService),
+        ServiceDisposition::Manage => {}
     }
-
-    ensure_service_is_supported(&svc)?;
 
     tracing::info!("Starting service reconciliation");
 
@@ -282,5 +302,96 @@ pub(super) fn error_action(
             Action::requeue(delay)
         }
         _ => Action::requeue(backoff.on_failure(service, now)),
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::consts;
+    use crate::test_utils::fixtures::{service_spec, service_with_spec};
+
+    #[test]
+    fn service_lifecycle_preserves_cleanup_when_type_or_class_changes() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        assert_eq!(classify_service(&svc), ServiceDisposition::Manage);
+
+        svc.spec.as_mut().unwrap().load_balancer_class = Some("other".to_string());
+        assert_eq!(classify_service(&svc), ServiceDisposition::Ignore);
+
+        svc.metadata.finalizers = Some(vec![consts::FINALIZER_NAME.to_string()]);
+        assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
+
+        svc.spec.as_mut().unwrap().type_ = Some("ClusterIP".to_string());
+        assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
+
+        svc.metadata.finalizers = None;
+        assert_eq!(classify_service(&svc), ServiceDisposition::Ignore);
+    }
+
+    #[test]
+    fn deleting_managed_service_always_enters_cleanup() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        svc.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ));
+        assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
+    }
+
+    #[test]
+    fn typed_outcomes_preserve_requeue_and_cache_policy() {
+        for outcome in [
+            ReconcileOutcome::Synced(Action::requeue(Duration::from_secs(300))),
+            ReconcileOutcome::Unchanged(Action::requeue(Duration::from_secs(300))),
+            ReconcileOutcome::Deleted(Action::await_change()),
+        ] {
+            assert!(outcome.was_successful());
+            assert!(should_reset_failure_backoff(&Ok(outcome)));
+        }
+        for reason in [PendingReason::RateLimited, PendingReason::Provisioning] {
+            let pending =
+                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
+            assert!(!pending.was_successful());
+            assert!(!should_reset_failure_backoff(&Ok(pending)));
+            let scheduled =
+                ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
+            assert_eq!(
+                scheduled.into_action(),
+                Action::requeue(Duration::from_secs(15))
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_service_is_not_reported_as_a_retryable_failure() {
+        let ignored: RobotLBResult<ReconcileOutcome> = Err(RobotLBError::SkipService);
+        assert!(should_reset_failure_backoff(&ignored));
+        assert_eq!(
+            error_action(
+                &RobotLBError::SkipService,
+                &crate::rate_limit::RateLimitGate::default(),
+                &crate::backoff::ErrorBackoff::default(),
+                std::time::Instant::now(),
+                "default/svc",
+            ),
+            Action::await_change(),
+        );
+    }
+
+    #[test]
+    fn failed_reconciliation_invalidates_success_memo() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        svc.metadata.uid = Some("service-uid".to_string());
+        let cache = memo::ReconcileMemo::default();
+        let now = std::time::Instant::now();
+        cache.record("service-uid", 123, now, Duration::from_secs(300), vec![]);
+        assert!(cache.unchanged("service-uid", 123, now).is_some());
+
+        cache.settle(&svc, true);
+        assert!(cache.unchanged("service-uid", 123, now).is_some());
+
+        cache.settle(&svc, false);
+        assert!(cache.unchanged("service-uid", 123, now).is_none());
     }
 }
