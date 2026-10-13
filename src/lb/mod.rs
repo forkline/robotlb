@@ -147,7 +147,9 @@ impl LoadBalancer {
         self.reconcile_network(&hcloud_balancer).await?;
         self.reconcile_services(&hcloud_balancer, &api).await?;
         if self.reconcile_targets(&hcloud_balancer, &api).await? {
-            return Ok(LoadBalancerReconcile::TargetsPending(Box::new(hcloud_balancer)));
+            return Ok(LoadBalancerReconcile::TargetsPending(Box::new(
+                hcloud_balancer,
+            )));
         }
         Ok(LoadBalancerReconcile::Reconciled(Box::new(hcloud_balancer)))
     }
@@ -735,7 +737,7 @@ async fn wait_for_action(
 }
 
 /// Bound the entire Action lifecycle, including stalled HTTP polling requests
-/// and any retries inside retry_temporary.
+/// and any retries inside `retry_temporary`.
 async fn wait_for_action_with_limits(
     api: &impl HcloudLoadBalancerApi,
     mut action: hcloud::models::Action,
@@ -765,9 +767,11 @@ async fn wait_for_action_with_limits(
         }
     })
     .await
-    .map_err(|_| RobotLBError::HCloudError(format!(
-        "Timed out waiting for Hetzner action {action_id} ({command})"
-    )))?
+    .map_err(|_| {
+        RobotLBError::HCloudError(format!(
+            "Timed out waiting for Hetzner action {action_id} ({command})"
+        ))
+    })?
 }
 
 /// Retry temporary Hetzner conflicts without treating permanent errors or 429s as transient.
@@ -1028,7 +1032,10 @@ mod tests {
             })
         }
         async fn get_action(&self, _action_id: i64) -> RobotLBResult<hcloud::models::Action> {
-            if self.hang_get_action.load(std::sync::atomic::Ordering::Relaxed) {
+            if self
+                .hang_get_action
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 std::future::pending::<RobotLBResult<hcloud::models::Action>>().await
             } else {
                 Ok(hcloud::models::Action {
