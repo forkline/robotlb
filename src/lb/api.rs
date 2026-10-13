@@ -234,27 +234,23 @@ pub async fn get_owned_load_balancer(
     Ok(owned.pop())
 }
 
-/// Adopt an unlabelled legacy balancer without changing its public IP or name.
-pub async fn adopt_load_balancer(
+/// Look up the provider's actual limits instead of hard-coding LB types.
+pub async fn get_load_balancer_type(
     hcloud_config: &HcloudConfig,
-    lb: &hcloud::models::LoadBalancer,
-    uid: &str,
-) -> RobotLBResult<hcloud::models::LoadBalancer> {
-    let mut labels = lb.labels.clone();
-    labels.insert(consts::LB_OWNER_LABEL.to_string(), uid.to_string());
-    let result = hcloud::apis::load_balancers_api::replace_load_balancer(
+    name: &str,
+) -> RobotLBResult<hcloud::models::LoadBalancerType> {
+    let response = hcloud::apis::load_balancer_types_api::list_load_balancer_types(
         hcloud_config,
-        hcloud::apis::load_balancers_api::ReplaceLoadBalancerParams {
-            id: lb.id,
-            replace_load_balancer_request: hcloud::models::ReplaceLoadBalancerRequest {
-                labels: Some(labels),
-                name: None,
-            },
-        },
+        Default::default(),
     )
-    .await
-    .map_err(|err| RobotLBError::HCloudError(format!("Cannot label legacy LB: {err}")))?;
-    Ok(*result.load_balancer)
+    .await?;
+    response
+        .load_balancer_types
+        .into_iter()
+        .find(|lb_type| lb_type.name == name)
+        .ok_or_else(|| RobotLBError::InvalidLoadBalancerConfiguration(format!(
+            "Hetzner load balancer type {name} is not available"
+        )))
 }
 
 /// Get a specific load balancer by name.
