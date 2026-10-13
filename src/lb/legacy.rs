@@ -305,24 +305,48 @@ mod tests {
             .labels
             .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
 
-        assert!(LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "different-uid", "web.default"));
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "other-name"));
+        assert!(LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "different-uid",
+            "web.default"
+        ));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "other-name"
+        ));
 
         replacement.labels.insert("team".into(), "platform".into());
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
         replacement.labels.remove("team");
 
         replacement
             .private_net
             .push(hcloud::models::LoadBalancerPrivateNet::default());
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
         replacement.private_net.clear();
 
         replacement
             .targets
             .push(hcloud::models::LoadBalancerTarget::default());
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
         replacement.targets.clear();
 
         replacement
@@ -342,7 +366,10 @@ mod tests {
                     timeout: 10,
                 }),
             });
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
     }
-
 }
