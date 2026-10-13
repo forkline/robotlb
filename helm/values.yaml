@@ -16,6 +16,10 @@ replicaCount: 1
 
 envs:
   ROBOTLB_LOG_LEVEL: "INFO"
+  # Optional cluster prefix when multiple clusters share one Hetzner project.
+  # ROBOTLB_CLUSTER_NAME: "prod"
+  # Full drift resync interval; Node and EndpointSlice changes trigger earlier.
+  ROBOTLB_RESYNC_INTERVAL: "300"
 
 existingSecrets: []
 
