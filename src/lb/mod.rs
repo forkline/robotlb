@@ -370,7 +370,11 @@ impl LoadBalancer {
         // otherwise cause targets to churn on each reconciliation.
         let max_targets =
             usize::try_from(hcloud_balancer.load_balancer_type.max_targets).unwrap_or(usize::MAX);
-        let max_targets = if max_targets == 0 { usize::MAX } else { max_targets };
+        let max_targets = if max_targets == 0 {
+            usize::MAX
+        } else {
+            max_targets
+        };
         let mut ordered: Vec<_> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         ordered.sort_unstable();
         ordered.dedup();
