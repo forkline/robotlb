@@ -45,6 +45,8 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 pub enum LoadBalancerReconcile {
     Reconciled(Box<hcloud::models::LoadBalancer>),
     TypeChangePending,
+    /// An unused 0.7.x replacement was removed; wait for Hetzner before adoption.
+    LegacyMigrationPending,
     TargetsPending(Box<hcloud::models::LoadBalancer>),
 }
 
@@ -134,7 +136,9 @@ impl LoadBalancer {
         let api = LiveHcloudLoadBalancerApi {
             hcloud_config: self.hcloud_config.clone(),
         };
-        let hcloud_balancer = self.get_or_create_hcloud_lb().await?;
+        let Some(hcloud_balancer) = self.get_or_create_hcloud_lb().await? else {
+            return Ok(LoadBalancerReconcile::LegacyMigrationPending);
+        };
         // A successful resize request starts an asynchronous Hetzner action.
         // The old LoadBalancerType metadata is no longer a safe capacity bound
         // for the subsequent target plan, particularly on upgrades/downgrades.
@@ -646,10 +650,81 @@ impl LoadBalancer {
         Ok(())
     }
 
+    /// If 0.7.x provisioned a new LB before seeing an original 0.6.x LB,
+    /// remove only the unused replacement, never the original traffic-bearing
+    /// resource. Adoption happens on a later pass after deletion is visible.
+    async fn recover_legacy_replacement(
+        &self,
+        owned: &hcloud::models::LoadBalancer,
+    ) -> RobotLBResult<bool> {
+        let Some(proof) = self.legacy_ownership.as_ref() else {
+            return Ok(false);
+        };
+        if owned.name != self.name {
+            return Ok(false);
+        }
+        let Some(legacy) =
+            api::find_legacy_load_balancer(&self.hcloud_config, &self.service_uid, proof).await?
+        else {
+            return Ok(false);
+        };
+
+        // Re-fetch by name/ID before deletion. A replacement that gained any
+        // traffic-bearing configuration or extra labels must never be removed.
+        let replacement = api::get_load_balancer(&self.hcloud_config, &owned.name)
+            .await?
+            .filter(|lb| lb.id == owned.id)
+            .ok_or_else(|| {
+                RobotLBError::HCloudError(
+                    "UID-owned replacement changed during legacy recovery; retrying".to_string(),
+                )
+            })?;
+        if !LegacyOwnership::is_unused_replacement(&replacement, &self.service_uid, &self.name) {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Legacy LB {} (ID {}) matches the Service, but replacement {} (ID {}) is not empty and exclusively UID-owned; refusing automatic deletion",
+                legacy.name, legacy.id, replacement.name, replacement.id
+            )));
+        }
+
+        // Invalidate the recovery if the original LB's identity or ownership
+        // proof changed. This is especially important for private-only LBs.
+        let original = api::get_load_balancer(&self.hcloud_config, &legacy.name)
+            .await?
+            .filter(|lb| lb.id == legacy.id)
+            .ok_or_else(|| {
+                RobotLBError::HCloudError(
+                    "Legacy load balancer changed during recovery; retrying".to_string(),
+                )
+            })?;
+        if proof
+            .labels_for_adoption(&original, &self.service_uid)
+            .is_none()
+        {
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(
+                "Legacy load balancer no longer matches Service ownership evidence".to_string(),
+            ));
+        }
+
+        retry_temporary(|| api::delete_load_balancer(&self.hcloud_config, replacement.id)).await?;
+        tracing::info!(
+            replacement_id = replacement.id,
+            legacy_id = legacy.id,
+            "Removed unused 0.7.x replacement; waiting to adopt original load balancer"
+        );
+        Ok(true)
+    }
+
     /// Get an owned LB or create a new one after validating capacity and name.
-    async fn get_or_create_hcloud_lb(&self) -> RobotLBResult<hcloud::models::LoadBalancer> {
-        let existing = if let Some(lb) = self.get_hcloud_lb().await? {
-            Some(lb)
+    /// None means a legacy recovery deletion is pending; do not create another LB.
+    async fn get_or_create_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+        let existing = self.get_hcloud_lb().await?;
+        if let Some(owned) = existing.as_ref()
+            && self.recover_legacy_replacement(owned).await?
+        {
+            return Ok(None);
+        }
+        let existing = if existing.is_some() {
+            existing
         } else {
             api::find_or_adopt_legacy_load_balancer(
                 &self.hcloud_config,
@@ -673,19 +748,21 @@ impl LoadBalancer {
             self.validate_capacity(&lb_type, existing.as_ref())?;
         }
         if let Some(lb) = existing {
-            return Ok(lb);
+            return Ok(Some(lb));
         }
 
-        api::create_load_balancer(
-            &self.hcloud_config,
-            &self.name,
-            &self.location,
-            &self.balancer_type,
-            self.algorithm.clone(),
-            self.public_interface,
-            &self.service_uid,
-        )
-        .await
+        Ok(Some(
+            api::create_load_balancer(
+                &self.hcloud_config,
+                &self.name,
+                &self.location,
+                &self.balancer_type,
+                self.algorithm.clone(),
+                self.public_interface,
+                &self.service_uid,
+            )
+            .await?,
+        ))
     }
 
     /// Get the network from Hetzner Cloud.

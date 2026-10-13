@@ -50,8 +50,10 @@ impl LegacyOwnership {
             if let Some(cluster) = config.cluster_name.as_deref() {
                 names.push(default_name(Some(cluster), &name, &namespace));
             }
-            // Upgrades may enable ROBOTLB_CLUSTER_NAME at the same time.
+            // 0.7.x introduced namespace-qualified names; 0.6.x used the
+            // bare Service name. Keep both forms for in-place upgrades.
             names.push(default_name(None, &name, &namespace));
+            names.push(name);
             names
         };
         Some(Self { names, ingress_ips })
@@ -76,6 +78,21 @@ impl LegacyOwnership {
         .collect();
         addresses.extend(lb.private_net.iter().filter_map(|net| net.ip.clone()));
         self.ingress_ips.iter().all(|ip| addresses.contains(ip))
+    }
+
+    /// A 0.7.x replacement is disposable only if it is exactly the newly
+    /// provisioned, UID-owned shell with no traffic-bearing configuration.
+    /// A legacy LB must be independently verified before calling this.
+    pub(super) fn is_unused_replacement(lb: &LoadBalancer, uid: &str, desired_name: &str) -> bool {
+        lb.name == desired_name
+            && lb.labels.len() == 1
+            && lb
+                .labels
+                .get(consts::LB_OWNER_LABEL)
+                .is_some_and(|owner| owner == uid)
+            && lb.private_net.is_empty()
+            && lb.services.is_empty()
+            && lb.targets.is_empty()
     }
 
     /// Never overwrite any existing owner label; preserve every unrelated label.
@@ -225,16 +242,19 @@ mod tests {
     }
 
     #[test]
-    fn considers_old_unprefixed_name_when_a_cluster_prefix_is_enabled() {
+    fn considers_pre_0_7_bare_name_when_a_cluster_prefix_is_enabled() {
         let mut config = config();
         config.cluster_name = Some("prod".into());
         let proof = LegacyOwnership::from_service(&service(), &config).unwrap();
-        assert_eq!(proof.names(), &["prod.web.default", "web.default"]);
+        assert_eq!(proof.names(), &["prod.web.default", "web.default", "web"]);
         assert!(
             proof
                 .labels_for_adoption(&balancer(), "service-uid")
                 .is_some()
         );
+        let mut old_lb = balancer();
+        old_lb.name = "web".into();
+        assert!(proof.labels_for_adoption(&old_lb, "service-uid").is_some());
 
         let mut svc = service();
         svc.metadata.annotations = Some(std::collections::BTreeMap::from([(
@@ -248,5 +268,104 @@ mod tests {
                 .labels_for_adoption(&balancer(), "service-uid")
                 .is_none()
         );
+    }
+    #[test]
+    fn adopts_bare_named_private_only_0_6_balancer() {
+        let mut svc = service();
+        svc.status
+            .as_mut()
+            .unwrap()
+            .load_balancer
+            .as_mut()
+            .unwrap()
+            .ingress = Some(vec![LoadBalancerIngress {
+            ip: Some("172.29.0.1".into()),
+            ..Default::default()
+        }]);
+        let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
+        let mut old_lb = balancer();
+        old_lb.name = "web".into();
+        old_lb.private_net = vec![hcloud::models::LoadBalancerPrivateNet {
+            ip: Some("172.29.0.1".into()),
+            ..Default::default()
+        }];
+        assert!(proof.labels_for_adoption(&old_lb, "service-uid").is_some());
+        old_lb.private_net[0].ip = Some("172.29.0.2".into());
+        assert!(proof.labels_for_adoption(&old_lb, "service-uid").is_none());
+    }
+
+    #[test]
+    fn only_discards_empty_uid_owned_0_7_replacements() {
+        let mut replacement = balancer();
+        replacement
+            .labels
+            .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
+
+        assert!(LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "different-uid",
+            "web.default"
+        ));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "other-name"
+        ));
+
+        replacement.labels.insert("team".into(), "platform".into());
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
+        replacement.labels.remove("team");
+
+        replacement
+            .private_net
+            .push(hcloud::models::LoadBalancerPrivateNet::default());
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
+        replacement.private_net.clear();
+
+        replacement
+            .targets
+            .push(hcloud::models::LoadBalancerTarget::default());
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
+        replacement.targets.clear();
+
+        replacement
+            .services
+            .push(hcloud::models::LoadBalancerService {
+                http: None,
+                listen_port: 6443,
+                destination_port: 32767,
+                protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
+                proxyprotocol: false,
+                health_check: Box::new(hcloud::models::LoadBalancerServiceHealthCheck {
+                    http: None,
+                    interval: 15,
+                    port: 32767,
+                    protocol: hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
+                    retries: 3,
+                    timeout: 10,
+                }),
+            });
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
     }
 }

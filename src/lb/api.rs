@@ -313,6 +313,30 @@ pub async fn get_load_balancer(
     Ok(matching.into_iter().next())
 }
 
+/// Discover an original balancer without modifying it. This is used when
+/// 0.7.x already created a UID-owned replacement before discovering the
+/// pre-0.7 resource. Multiple matching resources are unsafe to disambiguate.
+pub(super) async fn find_legacy_load_balancer(
+    hcloud_config: &HcloudConfig,
+    uid: &str,
+    proof: &LegacyOwnership,
+) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+    let mut candidate = None;
+    for name in proof.names() {
+        if let Some(lb) = get_load_balancer(hcloud_config, name).await?
+            && proof.labels_for_adoption(&lb, uid).is_some()
+        {
+            if candidate.is_some() {
+                return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                    "Multiple legacy load balancers match Service UID {uid}; refusing ambiguous recovery"
+                )));
+            }
+            candidate = Some(lb);
+        }
+    }
+    Ok(candidate)
+}
+
 /// Adopt an unlabelled 0.6.x LB only when the Service's old finalizer and
 /// published ingress addresses match the Hetzner resource. No listeners,
 /// targets, networks, IDs or IPs are changed during adoption.
