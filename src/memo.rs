@@ -87,7 +87,7 @@ pub fn fingerprint<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, ReconcileMemo};
+    use super::{ReconcileMemo, fingerprint};
     use crate::consts;
     use k8s_openapi::{
         api::core::v1::{
