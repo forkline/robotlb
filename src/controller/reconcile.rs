@@ -2,6 +2,7 @@
 
 use super::*;
 use super::events::publish_reconciliation_warning;
+use crate::memo;
 
 /// Whether reconciliation completed or intentionally deferred without applying state.
 /// Deferred attempts must not clear the Service's failure backoff or populate the memo.
