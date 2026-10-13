@@ -14,6 +14,8 @@ fullnameOverride: ""
 
 replicaCount: 1
 
+strategy: {}
+
 envs:
   ROBOTLB_LOG_LEVEL: "INFO"
   # Optional cluster prefix when multiple clusters share one Hetzner project.
@@ -86,6 +88,8 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+topologySpreadConstraints: []
 
 metrics:
   enabled: true

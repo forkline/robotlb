@@ -38,24 +38,31 @@ After the chart is installed, you should be able to create `LoadBalancer` servic
 
 ### High availability
 
-`robotlb` supports safe multi-replica deployment via Kubernetes Lease-based leader election. Run at
-least 2 replicas and use pod anti-affinity so only one pod is active leader while the other is
-standby.
+`robotlb` supports safe multi-replica deployment via Kubernetes Lease-based leader election.
+Run at least 2 replicas and use topology spread constraints to distribute pods of the same
+Deployment revision across nodes. Unlike required pod anti-affinity, this allows old and new
+revisions to share nodes during rolling updates.
 
-Example Helm values:
+Example Helm values (for a release named `robotlb`):
 
 ```yaml
-replicaCount: 2
+replicaCount: 3
 
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchLabels:
-            app.kubernetes.io/name: robotlb
-            app.kubernetes.io/instance: robotlb
-        topologyKey: kubernetes.io/hostname
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: robotlb
+        app.kubernetes.io/instance: robotlb
+    matchLabelKeys:
+      - pod-template-hash
 ```
+
+Match the `app.kubernetes.io/instance` label to your Helm release name. The
+`pod-template-hash` is set by the Deployment controller; do not add it to `podLabels`.
+`topologySpreadConstraints` is optional and defaults to an empty list.
 
 ## How it works
 
