@@ -377,8 +377,7 @@ impl LoadBalancer {
 
         // Count *all* provider targets for capacity, not just those with an IP.
         // Unknown/zero capacity conservatively falls back to replacement order.
-        let capacity = usize::try_from(hcloud_balancer.load_balancer_type.max_targets)
-            .unwrap_or(0);
+        let capacity = usize::try_from(hcloud_balancer.load_balancer_type.max_targets).unwrap_or(0);
         let spare = capacity.saturating_sub(hcloud_balancer.targets.len());
 
         let mut actions = Vec::with_capacity(to_add.len() + to_remove.len());
@@ -1198,5 +1197,4 @@ mod tests {
             ],
         );
     }
-
 }
