@@ -344,10 +344,8 @@ impl LoadBalancer {
         &self,
         hcloud_balancer: &hcloud::models::LoadBalancer,
     ) -> Vec<TargetReconcileAction> {
-        let mut actions = Vec::new();
-
-        // Capacity is validated before any Hetzner mutation. Never silently drop
-        // eligible nodes to fit a smaller balancer type.
+        // Keep target actions deterministic and avoid removing working backends
+        // before replacements are ready whenever the LB has spare capacity.
         let desired_targets: HashSet<String> =
             self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         let current_targets: HashSet<String> = hcloud_balancer
@@ -361,24 +359,44 @@ impl LoadBalancer {
             })
             .collect();
 
-        for target in &hcloud_balancer.targets {
-            let Some(target_ip) = target.ip.clone() else {
-                continue;
-            };
-            let normalized_target_ip = normalize_ip(&target_ip.ip);
-            if !desired_targets.contains(&normalized_target_ip) {
-                actions.push(TargetReconcileAction::Remove {
-                    target_ip: target_ip.ip,
-                });
-            }
+        let mut to_remove: Vec<String> = hcloud_balancer
+            .targets
+            .iter()
+            .filter_map(|target| target.ip.as_ref())
+            .filter(|target| !desired_targets.contains(&normalize_ip(&target.ip)))
+            .map(|target| target.ip.clone())
+            .collect();
+        to_remove.sort();
+        to_remove.dedup();
+
+        let mut to_add: Vec<String> = desired_targets
+            .difference(&current_targets)
+            .cloned()
+            .collect();
+        to_add.sort();
+
+        // Count *all* provider targets for capacity, not just those with an IP.
+        // Unknown/zero capacity conservatively falls back to replacement order.
+        let capacity = usize::try_from(hcloud_balancer.load_balancer_type.max_targets)
+            .unwrap_or(0);
+        let spare = capacity.saturating_sub(hcloud_balancer.targets.len());
+
+        let mut actions = Vec::with_capacity(to_add.len() + to_remove.len());
+        let mut additions = to_add.into_iter();
+        for ip in additions.by_ref().take(spare) {
+            actions.push(TargetReconcileAction::Add { target_ip: ip });
         }
 
-        for ip in desired_targets {
-            if !current_targets.contains(&ip) {
-                actions.push(TargetReconcileAction::Add { target_ip: ip });
+        let mut removals = to_remove.into_iter();
+        // At capacity, replace targets one at a time rather than first
+        // removing every stale target, which could cut off all backends.
+        for ip in additions {
+            if let Some(stale) = removals.next() {
+                actions.push(TargetReconcileAction::Remove { target_ip: stale });
             }
+            actions.push(TargetReconcileAction::Add { target_ip: ip });
         }
-
+        actions.extend(removals.map(|target_ip| TargetReconcileAction::Remove { target_ip }));
         actions
     }
 
@@ -951,6 +969,7 @@ mod tests {
             load_balancer_type: Box::new(hcloud::models::LoadBalancerType {
                 id: 1,
                 name: "lb11".to_string(),
+                max_targets: 25,
                 ..Default::default()
             }),
             ..Default::default()
@@ -1004,11 +1023,11 @@ mod tests {
         assert_eq!(
             api.calls(),
             vec![
-                ApiCall::RemoveTarget {
-                    ip: "10.0.0.3".to_string(),
-                },
                 ApiCall::AddTarget {
                     ip: "10.0.0.1".to_string(),
+                },
+                ApiCall::RemoveTarget {
+                    ip: "10.0.0.3".to_string(),
                 },
             ]
         );
@@ -1024,31 +1043,33 @@ mod tests {
             ..Default::default()
         };
 
-        // The stale target is removed; adding the replacement fails.
+        // Spare capacity allows add-first; an add failure must preserve
+        // the existing healthy target rather than deleting it prematurely.
         assert!(lb.reconcile_targets(&before, &api).await.is_err());
         assert_eq!(
             api.calls(),
+            vec![ApiCall::AddTarget {
+                ip: "10.0.0.1".into()
+            }],
+        );
+
+        // A retry from the provider's unchanged state adds the missing
+        // backend before removing the obsolete one.
+        lb.reconcile_targets(&before, &api).await.unwrap();
+        assert_eq!(
+            api.calls(),
             vec![
-                ApiCall::RemoveTarget {
-                    ip: "10.0.0.3".into()
+                ApiCall::AddTarget {
+                    ip: "10.0.0.1".into()
                 },
                 ApiCall::AddTarget {
                     ip: "10.0.0.1".into()
                 },
+                ApiCall::RemoveTarget {
+                    ip: "10.0.0.3".into()
+                },
             ],
         );
-
-        // Re-observe Hetzner after the partial change: only the missing
-        // target is added, rather than replaying the successful removal.
-        let after_removal = remote_balancer_with_services(vec![], vec!["10.0.0.2"]);
-        lb.reconcile_targets(&after_removal, &api).await.unwrap();
-        assert_eq!(
-            api.calls().last(),
-            Some(&ApiCall::AddTarget {
-                ip: "10.0.0.1".into()
-            }),
-        );
-        assert_eq!(api.calls().len(), 3);
     }
 
     #[tokio::test]
@@ -1118,13 +1139,64 @@ mod tests {
         assert_eq!(
             plan,
             vec![
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.3".to_string(),
-                },
                 TargetReconcileAction::Add {
                     target_ip: "10.0.0.1".to_string(),
+                },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.3".to_string(),
                 },
             ]
         );
     }
+    #[test]
+    fn at_capacity_targets_are_replaced_one_at_a_time() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
+        remote.load_balancer_type.max_targets = 2;
+
+        assert_eq!(
+            lb.plan_target_actions(&remote),
+            vec![
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.3".into()
+                },
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.1".into()
+                },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.4".into()
+                },
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.2".into()
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn spare_capacity_preserves_old_backends_until_additions() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
+        let actions = lb.plan_target_actions(&remote);
+        assert_eq!(
+            actions,
+            vec![
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.1".into()
+                },
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.2".into()
+                },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.3".into()
+                },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.4".into()
+                },
+            ],
+        );
+    }
+
 }
