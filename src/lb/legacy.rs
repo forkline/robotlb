@@ -212,10 +212,14 @@ mod tests {
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_some());
 
         let lb_status = svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap();
-        lb_status.ingress.as_mut().unwrap().push(LoadBalancerIngress {
-            ip: Some("198.51.100.99".into()),
-            ..Default::default()
-        });
+        lb_status
+            .ingress
+            .as_mut()
+            .unwrap()
+            .push(LoadBalancerIngress {
+                ip: Some("198.51.100.99".into()),
+                ..Default::default()
+            });
         let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
     }
