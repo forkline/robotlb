@@ -81,6 +81,29 @@ pub fn ensure_service_is_supported(svc: &Service) -> RobotLBResult<()> {
     Ok(())
 }
 
+/// Whether reconciliation completed or intentionally deferred without applying state.
+/// Deferred attempts must not clear the Service's failure backoff or populate the memo.
+#[derive(Debug)]
+enum ReconcileOutcome {
+    Applied(Action),
+    Deferred(Action),
+}
+
+impl ReconcileOutcome {
+    const fn into_action(self) -> Action {
+        match self {
+            Self::Applied(action) | Self::Deferred(action) => action,
+        }
+    }
+}
+
+fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
+    matches!(
+        result,
+        Ok(ReconcileOutcome::Applied(_)) | Err(RobotLBError::SkipService)
+    )
+}
+
 /// Reconcile the service.
 ///
 /// This function is called by the controller for each service.
@@ -97,8 +120,10 @@ pub async fn reconcile_service(
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
     let result = reconcile_service_inner(svc.clone(), context.clone()).await;
-    context.memo.settle(&svc, result.is_ok());
-    if matches!(result, Ok(_) | Err(RobotLBError::SkipService)) {
+    context
+        .memo
+        .settle(&svc, matches!(result, Ok(ReconcileOutcome::Applied(_))));
+    if should_reset_failure_backoff(&result) {
         context.error_backoff.forget(&service_key(&svc));
     }
     if let Err(error) = &result
@@ -107,13 +132,13 @@ pub async fn reconcile_service(
         timer.set_failed();
         publish_reconciliation_warning(&svc, &context, error).await;
     }
-    result
+    result.map(ReconcileOutcome::into_action)
 }
 
 async fn reconcile_service_inner(
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
-) -> RobotLBResult<Action> {
+) -> RobotLBResult<ReconcileOutcome> {
     if !context.is_leader.load(Ordering::Relaxed) {
         return Err(RobotLBError::SkipService);
     }
@@ -122,7 +147,7 @@ async fn reconcile_service_inner(
             ?delay,
             "Hetzner API rate limit pause; skipping reconciliation"
         );
-        return Ok(Action::requeue(delay));
+        return Ok(ReconcileOutcome::Deferred(Action::requeue(delay)));
     }
 
     // Release resources even if a Service changed its type/class, and even if
@@ -132,7 +157,7 @@ async fn reconcile_service_inner(
     {
         LoadBalancer::cleanup_service(&svc, &context).await?;
         finalizers::remove(context.client.clone(), &svc).await?;
-        return Ok(Action::await_change());
+        return Ok(ReconcileOutcome::Applied(Action::await_change()));
     }
 
     ensure_service_is_supported(&svc)?;
@@ -227,11 +252,11 @@ fn event_note(error: &RobotLBError, token: &str) -> String {
 /// # Errors
 ///
 /// Returns an error if node discovery fails, or if the Kubernetes/Hetzner API call fails.
-pub async fn reconcile_load_balancer(
+async fn reconcile_load_balancer(
     mut lb: LoadBalancer,
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
-) -> RobotLBResult<Action> {
+) -> RobotLBResult<ReconcileOutcome> {
     let desired_ip_type = node_ip_type(&lb);
 
     let nodes = discover_target_nodes(&svc, &context).await?;
@@ -256,7 +281,7 @@ pub async fn reconcile_load_balancer(
             .unchanged(uid, fingerprint, std::time::Instant::now())
     }) {
         tracing::debug!("No effective configuration change; skipping Hetzner API");
-        return Ok(Action::requeue(wait));
+        return Ok(ReconcileOutcome::Applied(Action::requeue(wait)));
     }
 
     let hcloud_lb = lb.reconcile().await?;
@@ -267,6 +292,19 @@ pub async fn reconcile_load_balancer(
         lb.proxy_mode,
         lb.public_interface,
     );
+    // Hetzner may acknowledge creation or network attachment before assigning an
+    // address. A successful API response is not a complete LoadBalancer reconcile
+    // until Kubernetes can advertise an ingress address. In particular, never
+    // memoize an empty result and postpone address discovery for five minutes.
+    if should_retry_missing_ingress(&ingress) {
+        tracing::info!(
+            service = %svc.name_any(),
+            "Load balancer has no ingress address yet; retrying shortly"
+        );
+        return Ok(ReconcileOutcome::Deferred(Action::requeue(
+            Duration::from_secs(15),
+        )));
+    }
     patch_ingress_status(&svc, &context, ingress).await?;
 
     let resync = Duration::from_secs(context.config.resync_interval);
@@ -275,7 +313,11 @@ pub async fn reconcile_load_balancer(
             .memo
             .record(&uid, fingerprint, std::time::Instant::now(), resync);
     }
-    Ok(Action::requeue(resync))
+    Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
+}
+
+fn should_retry_missing_ingress(ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress]) -> bool {
+    ingress.is_empty()
 }
 
 /// Schedule failures independently, but pause the entire project on rate limits.
@@ -463,6 +505,46 @@ mod tests {
         assert!(!note.contains(&token[..12]));
         assert!(note.len() <= 1024);
         assert!(note.is_char_boundary(note.len()));
+    }
+
+    #[test]
+    fn deferred_reconciliations_preserve_backoff() {
+        let rate_limit = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let now = std::time::Instant::now();
+        let svc = "shop/web";
+        let error = RobotLBError::HCloudError("temporary outage".to_string());
+        let first = error_action(&error, &rate_limit, &backoff, now, svc);
+        assert_eq!(first, Action::requeue(Duration::from_secs(5)));
+        let delayed = Ok(ReconcileOutcome::Deferred(Action::requeue(
+            Duration::from_secs(60),
+        )));
+        assert!(!should_reset_failure_backoff(&delayed));
+        // This is the exact shared-429 deferral path: it must not call forget().
+        if should_reset_failure_backoff(&delayed) {
+            backoff.forget(svc);
+        }
+        assert_eq!(
+            error_action(&error, &rate_limit, &backoff, now, svc),
+            Action::requeue(Duration::from_secs(10))
+        );
+        assert!(should_reset_failure_backoff(&Ok(ReconcileOutcome::Applied(
+            Action::await_change()
+        ))));
+        assert!(should_reset_failure_backoff(&Err(RobotLBError::SkipService)));
+        assert!(!should_reset_failure_backoff(&Err(error)));
+    }
+
+    #[test]
+    fn an_unassigned_lb_address_is_not_considered_reconciled() {
+        // Neither a new public balancer nor a private network attachment should
+        // be cached while Hetzner has not returned a routable ingress address.
+        assert!(should_retry_missing_ingress(&[]));
+        let ingress = vec![k8s_openapi::api::core::v1::LoadBalancerIngress {
+            ip: Some("192.0.2.2".to_string()),
+            ..Default::default()
+        }];
+        assert!(!should_retry_missing_ingress(&ingress));
     }
 
     #[test]
