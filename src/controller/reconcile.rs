@@ -3,13 +3,14 @@
 use super::events::publish_reconciliation_warning;
 use super::{
     apply_desired_state, build_ingress, derive_services, derive_targets, discover_target_nodes,
-    ensure_service_is_supported, node_ip_type, patch_ingress_status,
+    ensure_service_is_supported, patch_ingress_status,
 };
-use crate::lb::LoadBalancer;
 use crate::{
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
-    finalizers, memo,
+    finalizers,
+    lb::{DesiredLoadBalancer, LoadBalancer},
+    memo,
     metrics::ReconcileTimer,
 };
 use k8s_openapi::api::core::v1::Service;
@@ -132,13 +133,13 @@ async fn reconcile_service_inner(
 
     tracing::info!("Starting service reconciliation");
 
-    let lb = LoadBalancer::try_from_svc(&svc, &context)?;
+    let desired = DesiredLoadBalancer::from_service(&svc, &context.config)?;
 
     if !finalizers::check(&svc) {
         finalizers::add(context.client.clone(), &svc).await?;
     }
 
-    reconcile_load_balancer(lb, svc, context).await
+    reconcile_load_balancer(desired, svc, context).await
 }
 
 fn service_key(svc: &Service) -> String {
@@ -155,11 +156,11 @@ fn service_key(svc: &Service) -> String {
 ///
 /// Returns an error if node discovery fails, or if the Kubernetes/Hetzner API call fails.
 async fn reconcile_load_balancer(
-    mut lb: LoadBalancer,
+    mut desired: DesiredLoadBalancer,
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
 ) -> RobotLBResult<ReconcileOutcome> {
-    let desired_ip_type = node_ip_type(&lb);
+    let desired_ip_type = desired.ip_type();
 
     let nodes = discover_target_nodes(&svc, &context).await?;
     let desired_targets = derive_targets(nodes, desired_ip_type);
@@ -173,7 +174,8 @@ async fn reconcile_load_balancer(
         ));
     }
 
-    apply_desired_state(&mut lb, desired_targets, desired_services);
+    apply_desired_state(&mut desired, desired_targets, desired_services);
+    let lb = desired.into_load_balancer(context.hcloud_config.clone());
 
     let uid = svc.uid();
     let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);

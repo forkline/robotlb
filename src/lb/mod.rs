@@ -7,7 +7,10 @@
 
 mod api;
 mod config;
+mod desired;
 mod types;
+
+pub(crate) use desired::DesiredLoadBalancer;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -88,25 +91,8 @@ impl LoadBalancer {
     ///
     /// Returns an error if required annotations are missing or invalid.
     pub fn try_from_svc(svc: &Service, context: &CurrentContext) -> RobotLBResult<Self> {
-        let parsed = parse_load_balancer_config(svc, &context.config)?;
-
-        Ok(Self {
-            name: parsed.name,
-            service_uid: svc.metadata.uid.clone().unwrap_or_default(),
-            private_ip: parsed.private_ip,
-            public_interface: parsed.public_interface,
-            balancer_type: parsed.balancer_type,
-            check_interval: parsed.check_interval,
-            timeout: parsed.timeout,
-            retries: parsed.retries,
-            location: parsed.location,
-            proxy_mode: parsed.proxy_mode,
-            network_name: parsed.network_name,
-            algorithm: parsed.algorithm,
-            services: HashMap::default(),
-            targets: Vec::default(),
-            hcloud_config: context.hcloud_config.clone(),
-        })
+        Ok(DesiredLoadBalancer::from_service(svc, &context.config)?
+            .into_load_balancer(context.hcloud_config.clone()))
     }
 
     /// Add a service to the load balancer.

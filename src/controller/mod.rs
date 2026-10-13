@@ -42,7 +42,7 @@ use crate::{
 };
 
 pub(crate) use nodes::{
-    apply_desired_state, derive_services, derive_targets, discover_target_nodes, node_ip_type,
+    apply_desired_state, derive_services, derive_targets, discover_target_nodes,
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
 

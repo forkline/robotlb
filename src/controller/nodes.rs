@@ -15,18 +15,8 @@ use crate::{
     CurrentContext, consts,
     error::{RobotLBError, RobotLBResult},
     label_filter::LabelFilter,
-    lb::LoadBalancer,
+    lb::DesiredLoadBalancer,
 };
-
-/// Determine the IP type to use for targets based on load balancer configuration.
-#[must_use]
-pub const fn node_ip_type(lb: &LoadBalancer) -> &'static str {
-    if lb.network_name.is_none() {
-        "ExternalIP"
-    } else {
-        "InternalIP"
-    }
-}
 
 /// Extract target IPs from nodes based on the desired IP type.
 #[must_use]
@@ -154,7 +144,7 @@ pub async fn discover_target_nodes(
 
 /// Apply desired state to a load balancer.
 pub fn apply_desired_state(
-    lb: &mut LoadBalancer,
+    lb: &mut DesiredLoadBalancer,
     desired_targets: Vec<String>,
     desired_services: Vec<(i32, i32)>,
 ) {
