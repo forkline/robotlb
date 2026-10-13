@@ -1,9 +1,8 @@
 //! Kubernetes Service events: stable reasons, redaction and publication throttling.
 
 use super::*;
-use event_throttle::EventKey;
+use super::event_throttle::EventKey;
 use kube::runtime::events::{Event, EventType};
-use super::event_throttle;
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
 /// Event publishing errors must not hide the original reconciliation failure.
