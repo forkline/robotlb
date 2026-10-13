@@ -242,17 +242,23 @@ The class is effectively immutable after creation; recreating the Service can
 replace the LB and change its IP.
 
 Node changes that affect targets (readiness, labels, cordon state or addresses)
-trigger reconciliation immediately; kubelet heartbeats do not. EndpointSlice
-updates also reconcile their Service. On otherwise unchanged Services, the
-operator compares the desired Service spec, `robotlb/` annotations, target IPs
-and listener ports with the last successful reconcile and skips Hetzner requests.
+trigger reconciliation immediately; kubelet heartbeats do not. For `Local`
+Services, EndpointSlice updates reconcile only when relevant target nodes change:
+Pod-selector Services ignore endpoint readiness/address churn, while selectorless
+Services track ready endpoint nodes. EndpointSlice deletions also trigger
+reconciliation. On otherwise unchanged Services, the operator compares the
+desired Service spec, `robotlb/` annotations, target IPs and listener ports with
+the last successful reconcile and skips Hetzner requests.
 Every `ROBOTLB_RESYNC_INTERVAL` seconds (default **300**) it performs a full
 check anyway to recover out-of-band changes made in Hetzner.
 
 A failing Service retries independently with exponential backoff from 5 seconds
 up to 5 minutes, without suppressing reconciliation triggered by Kubernetes
-watch events. Project-wide Hetzner API rate limits use the separate shared gate.
-Errors remain visible in logs and Kubernetes Warning Events.
+watch events. Project-wide Hetzner API rate limits use the separate shared gate
+without resetting the per-Service failure backoff. After Hetzner creates an LB,
+the operator retries every 15 seconds until an ingress address is available;
+an incomplete provisioning response is never cached. Errors remain visible in
+logs and Kubernetes Warning Events.
 
 When several clusters share one Hetzner Cloud project, set
 `ROBOTLB_CLUSTER_NAME` (for example `prod`) to a DNS-label prefix
