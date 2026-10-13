@@ -1,4 +1,4 @@
-//! Track target-relevant EndpointSlice changes without reconciling on every
+//! Track target-relevant `EndpointSlice` changes without reconciling on every
 //! endpoint readiness or address update. A second metadata-only watch detects
 //! deletions, which kube's controller watch mapper cannot identify.
 
@@ -17,7 +17,7 @@ pub(super) enum SliceTargetMode {
     /// For selector-based Local Services, actual targets are based on Pod
     /// placement, not on the readiness of individual endpoints.
     PodNodes,
-    /// Selectorless Services use ready EndpointSlice nodes for targets.
+    /// Selectorless Services use ready `EndpointSlice` nodes for targets.
     ReadyEndpointNodes,
 }
 
@@ -48,7 +48,7 @@ struct State {
     relisted: HashSet<SliceKey>,
 }
 
-/// A shared cache for the controller's EndpointSlice mapper and the deletion watch.
+/// A shared cache for the controller's `EndpointSlice` mapper and the deletion watch.
 #[derive(Debug, Default)]
 pub(super) struct SliceChanges {
     state: Mutex<State>,
@@ -87,9 +87,10 @@ impl SliceChanges {
             }
             Event::InitDone => {
                 let live = std::mem::take(&mut state.relisted);
-                let removed = state.observed.iter().any(|(name, nodes)| {
-                    !live.contains(name) && !nodes.is_empty()
-                });
+                let removed = state
+                    .observed
+                    .iter()
+                    .any(|(name, nodes)| !live.contains(name) && !nodes.is_empty());
                 state.observed.retain(|name, _| live.contains(name));
                 state.live = live;
                 removed
