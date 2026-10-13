@@ -42,10 +42,10 @@ impl ReconcileMemo {
         let serves =
             svc.meta().deletion_timestamp.is_none()
                 && crate::controller::ensure_service_is_supported(svc).is_ok();
-        if !(succeeded && serves) {
-            if let Some(uid) = svc.uid() {
-                self.forget(&uid);
-            }
+        if !(succeeded && serves)
+            && let Some(uid) = svc.uid()
+        {
+            self.forget(&uid);
         }
     }
 
@@ -94,7 +94,7 @@ mod tests {
             LoadBalancerIngress, LoadBalancerStatus, Service, ServicePort, ServiceSpec,
             ServiceStatus,
         },
-        apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time},
+        apimachinery::pkg::apis::meta::v1::ObjectMeta,
     };
     use kube::ResourceExt;
     use std::{
@@ -228,7 +228,9 @@ mod tests {
         svc.spec.as_mut().unwrap().load_balancer_class = Some("other".to_string());
         assert!(!settled(&svc, true));
         let mut svc = service();
-        svc.metadata.deletion_timestamp = Some(Time(k8s_openapi::chrono::Utc::now()));
+        svc.metadata.deletion_timestamp = Some(
+            k8s_openapi::serde_json::from_str("\\"2026-01-01T00:00:00Z\\"").unwrap(),
+        );
         assert!(!settled(&svc, true));
     }
 
