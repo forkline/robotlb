@@ -329,9 +329,13 @@ async fn reconcile_load_balancer(
 
     let resync = Duration::from_secs(context.config.resync_interval);
     if let Some(uid) = uid {
-        context
-            .memo
-            .record(&uid, fingerprint, std::time::Instant::now(), resync, ingress);
+        context.memo.record(
+            &uid,
+            fingerprint,
+            std::time::Instant::now(),
+            resync,
+            ingress,
+        );
     }
     Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
 }
@@ -640,7 +644,13 @@ mod tests {
         let error = RobotLBError::LoadBalancerProvisioningTimeout;
         assert_eq!(warning_reason(&error), "LoadBalancerProvisioningTimeout");
         assert_eq!(
-            error_action(&error, &gate, &backoff, std::time::Instant::now(), "shop/web"),
+            error_action(
+                &error,
+                &gate,
+                &backoff,
+                std::time::Instant::now(),
+                "shop/web"
+            ),
             Action::requeue(INGRESS_RETRY_INTERVAL)
         );
     }
