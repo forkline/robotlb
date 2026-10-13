@@ -248,9 +248,11 @@ pub async fn get_load_balancer_type(
         .load_balancer_types
         .into_iter()
         .find(|lb_type| lb_type.name == name)
-        .ok_or_else(|| RobotLBError::InvalidLoadBalancerConfiguration(format!(
-            "Hetzner load balancer type {name} is not available"
-        )))
+        .ok_or_else(|| {
+            RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Hetzner load balancer type {name} is not available"
+            ))
+        })
 }
 
 /// Get a specific load balancer by name.
