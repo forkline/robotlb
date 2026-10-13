@@ -30,6 +30,43 @@ pub fn redact(message: &str, token: &str) -> String {
     safe
 }
 
+/// Format a Hetzner error with its concrete network/TLS/DNS cause.
+/// The caller redacts the configured token before writing it to logs or Events.
+fn describe_hcloud<T>(error: &hcloud::apis::Error<T>) -> String {
+    use std::error::Error as _;
+    let (mut description, mut cause): (String, Option<&(dyn std::error::Error + 'static)>) =
+        match error {
+            hcloud::apis::Error::Reqwest(inner) => (inner.to_string(), inner.source()),
+            hcloud::apis::Error::Io(inner) => (inner.to_string(), inner.source()),
+            hcloud::apis::Error::Serde(inner) => (inner.to_string(), inner.source()),
+            hcloud::apis::Error::ResponseError(response) => {
+                let detail = k8s_openapi::serde_json::from_str::<k8s_openapi::serde_json::Value>(
+                    &response.content,
+                )
+                .ok()
+                .and_then(|value| {
+                    Some(format!(
+                        "{}: {}",
+                        value.pointer("/error/code")?.as_str()?,
+                        value.pointer("/error/message")?.as_str()?,
+                    ))
+                });
+                let message = detail.map_or_else(
+                    || response.status.to_string(),
+                    |text| format!("{}: {text}", response.status),
+                );
+                (message, None)
+            }
+        };
+    while let Some(source) = cause {
+        description.push_str(": ");
+        description.push_str(&source.to_string());
+        cause = source.source();
+    }
+    // The same message is also emitted in Kubernetes Events, which are line-oriented.
+    description.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// All possible errors that can occur in the robotlb operator.
 #[derive(Debug, Error)]
 pub enum RobotLBError {
@@ -47,7 +84,7 @@ pub enum RobotLBError {
     HCloudError(String),
     #[error("Invalid load balancer configuration: {0}")]
     InvalidLoadBalancerConfiguration(String),
-    #[error("Cannot list Hetzner load balancer types: {0}")]
+    #[error("Cannot list Hetzner load balancer types: {}", describe_hcloud(.0))]
     HCloudListLoadBalancerTypesError(
         #[from]
         hcloud::apis::Error<hcloud::apis::load_balancer_types_api::ListLoadBalancerTypesError>,
@@ -60,62 +97,62 @@ pub enum RobotLBError {
     ServiceWithoutSelector,
 
     // HCloud API errors
-    #[error("Cannot attach load balancer to a network. Reason: {0}")]
+    #[error("Cannot attach load balancer to a network. Reason: {}", describe_hcloud(.0))]
     HCloudLBAttachToNetworkError(
         #[from]
         hcloud::apis::Error<hcloud::apis::load_balancers_api::AttachLoadBalancerToNetworkError>,
     ),
-    #[error("Cannot detach load balancer from network. Reason: {0}")]
+    #[error("Cannot detach load balancer from network. Reason: {}", describe_hcloud(.0))]
     HcloudLBDetachFromNetworkError(
         #[from]
         hcloud::apis::Error<hcloud::apis::load_balancers_api::DetachLoadBalancerFromNetworkError>,
     ),
-    #[error("Cannot add load balancer target. Reason: {0}")]
+    #[error("Cannot add load balancer target. Reason: {}", describe_hcloud(.0))]
     HcloudLBAddTargetError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::AddTargetError>,
     ),
-    #[error("Cannot remove load balancer target. Reason: {0}")]
+    #[error("Cannot remove load balancer target. Reason: {}", describe_hcloud(.0))]
     HcloudLBRemoveTargetError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::RemoveTargetError>,
     ),
-    #[error("Cannot add service to load balancer. Reason: {0}")]
+    #[error("Cannot add service to load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBAddServiceError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::AddServiceError>,
     ),
-    #[error("Cannot remove service from load balancer. Reason: {0}")]
+    #[error("Cannot remove service from load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBRemoveServiceError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::DeleteServiceError>,
     ),
-    #[error("Cannot create load balancer. Reason: {0}")]
+    #[error("Cannot create load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBCreateError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::CreateLoadBalancerError>,
     ),
-    #[error("Cannot delete load balancer. Reason: {0}")]
+    #[error("Cannot delete load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBDeleteError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::DeleteLoadBalancerError>,
     ),
-    #[error("Cannot get load balancer. Reason: {0}")]
+    #[error("Cannot get load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBGetError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::GetLoadBalancerError>,
     ),
-    #[error("Cannot update service. Reason: {0}")]
+    #[error("Cannot update service. Reason: {}", describe_hcloud(.0))]
     HcloudLBUpdateServiceError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::UpdateServiceError>,
     ),
-    #[error("Cannot change type of load balancer. Reason: {0}")]
+    #[error("Cannot change type of load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBChangeType(
         #[from]
         hcloud::apis::Error<hcloud::apis::load_balancers_api::ChangeTypeOfLoadBalancerError>,
     ),
-    #[error("Cannot change algorithm of load balancer. Reason: {0}")]
+    #[error("Cannot change algorithm of load balancer. Reason: {}", describe_hcloud(.0))]
     HcloudLBChangeAlgorithm(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::ChangeAlgorithmError>,
     ),
-    #[error("Cannot list networks. Reason: {0}")]
+    #[error("Cannot list networks. Reason: {}", describe_hcloud(.0))]
     HcloudListNetworksError(
         #[from] hcloud::apis::Error<hcloud::apis::networks_api::ListNetworksError>,
     ),
-    #[error("Cannot list load balancers. Reason: {0}")]
+    #[error("Cannot list load balancers. Reason: {}", describe_hcloud(.0))]
     HcloudListLoadBalancersError(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::ListLoadBalancersError>,
     ),
