@@ -66,10 +66,10 @@ pub fn parse_load_balancer_config(
         .get(consts::LB_NAME_ANNOTATION)
         .cloned()
         .unwrap_or_else(|| {
-            format!(
-                "{}.{}",
-                svc.name_any(),
-                svc.namespace().unwrap_or_else(|| "default".to_string())
+            default_name(
+                config.cluster_name.as_deref(),
+                &svc.name_any(),
+                &svc.namespace().unwrap_or_else(|| "default".to_string()),
             )
         });
 
@@ -115,6 +115,47 @@ pub fn parse_load_balancer_config(
     })
 }
 
+const MAX_LB_NAME: usize = 128;
+
+/// A stable 64-bit name suffix. Balancer names are external identities, so the
+/// hash algorithm must never change between operator releases.
+fn fnv1a64(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn default_name(cluster: Option<&str>, service: &str, namespace: &str) -> String {
+    let name = cluster.map_or_else(
+        || format!("{service}.{namespace}"),
+        |cluster| format!("{cluster}.{service}.{namespace}"),
+    );
+    if name.len() <= MAX_LB_NAME {
+        return name;
+    }
+    // Service, namespace and validated cluster names are ASCII DNS labels.
+    let suffix = format!("-{:016x}", fnv1a64(&name));
+    format!("{}{}", &name[..MAX_LB_NAME - suffix.len()], suffix)
+}
+
+/// Validate the DNS-label cluster prefix at startup instead of failing on an API call.
+///
+/// # Errors
+///
+/// Returns an error if the name is not a valid DNS label.
+pub fn parse_cluster_name(value: &str) -> Result<String, String> {
+    let ascii_alnum = |ch: char| ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    let valid = (1..=63).contains(&value.len())
+        && value.chars().all(|ch| ascii_alnum(ch) || ch == '-')
+        && value.starts_with(ascii_alnum)
+        && value.ends_with(ascii_alnum);
+    if valid {
+        Ok(value.to_string())
+    } else {
+        Err("must be a DNS label: 1 to 63 lowercase letters, digits or '-', starting and ending with a letter or digit".to_string())
+    }
+}
+
 /// Parse a numeric or boolean annotation from a service.
 fn parse_annotation<T>(svc: &Service, key: &str) -> RobotLBResult<Option<T>>
 where
@@ -151,8 +192,10 @@ mod tests {
     fn base_config() -> OperatorConfig {
         OperatorConfig {
             hcloud_token: "token".to_string(),
+            cluster_name: None,
             default_network: Some("default-net".to_string()),
             dynamic_node_selector: true,
+            resync_interval: 300,
             default_lb_retries: 3,
             default_lb_timeout: 10,
             default_lb_interval: 15,
@@ -207,6 +250,58 @@ mod tests {
         assert_eq!(parsed.network_name.as_deref(), Some("default-net"));
         assert!(!parsed.proxy_mode);
         assert!(parsed.public_interface);
+    }
+
+    #[test]
+    fn cluster_prefix_only_changes_unannotated_names() {
+        let mut config = base_config();
+        config.cluster_name = Some("prod".to_string());
+        let svc = service_with_annotations([]);
+        let parsed = parse_load_balancer_config(&svc, &config).unwrap();
+        assert_eq!(parsed.name, "prod.svc-name.default");
+        let annotated = service_with_annotations([(consts::LB_NAME_ANNOTATION, "custom")]);
+        assert_eq!(
+            parse_load_balancer_config(&annotated, &config)
+                .unwrap()
+                .name,
+            "custom"
+        );
+    }
+
+    #[test]
+    fn stable_hashed_names_fit_hetzner_limit() {
+        let part = "a".repeat(63);
+        let whole = format!("{part}.{part}.{part}");
+        let generated = default_name(Some(&part), &part, &part);
+        assert_eq!(generated.len(), 128);
+        assert_eq!(
+            generated,
+            format!("{}-{:016x}", &whole[..111], fnv1a64(&whole))
+        );
+        assert_eq!(fnv1a64("foobar"), 0x8594_4171_f739_67e8);
+        assert_ne!(
+            default_name(Some(&part), &part, &"b".repeat(63)),
+            default_name(Some(&part), &part, &"c".repeat(63))
+        );
+    }
+
+    #[test]
+    fn invalid_cluster_names_are_rejected() {
+        for invalid in [
+            "",
+            "Prod",
+            "prod.eu",
+            "-prod",
+            "prod-",
+            "some_name",
+            "prød",
+            &"a".repeat(64),
+        ] {
+            assert!(parse_cluster_name(invalid).is_err(), "{invalid:?}");
+        }
+        for valid in ["a", "prod", "eu-1", &"a".repeat(63)] {
+            assert_eq!(parse_cluster_name(valid).as_deref(), Ok(valid));
+        }
     }
 
     #[test]

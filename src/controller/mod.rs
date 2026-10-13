@@ -4,23 +4,27 @@
 //! with the `robotlb` load balancer class.
 
 mod event_throttle;
+mod node_changes;
 mod nodes;
+mod slice_changes;
 mod status;
 
 use event_throttle::EventKey;
 pub(crate) use event_throttle::EventThrottle;
+use slice_changes::{SliceChanges, SliceTargetMode};
 
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
+use crate::memo;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
     Resource, ResourceExt,
     runtime::{
-        Controller,
+        Controller, WatchStreamExt,
         controller::Action,
         events::{Event, EventType, Recorder, Reporter},
         reflector::ObjectRef,
@@ -40,8 +44,6 @@ pub(crate) use nodes::{
     apply_desired_state, derive_services, derive_targets, discover_target_nodes, node_ip_type,
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
-
-const SUCCESS_REQUEUE_SECS: u64 = 180;
 
 /// Check if a service is supported by robotlb.
 ///
@@ -81,6 +83,32 @@ pub fn ensure_service_is_supported(svc: &Service) -> RobotLBResult<()> {
     Ok(())
 }
 
+/// Whether reconciliation completed or intentionally deferred without applying state.
+/// Deferred attempts must not clear the Service's failure backoff or populate the memo.
+#[derive(Debug)]
+enum ReconcileOutcome {
+    Applied(Action),
+    Deferred(Action),
+}
+
+impl ReconcileOutcome {
+    const fn into_action(self) -> Action {
+        match self {
+            Self::Applied(action) | Self::Deferred(action) => action,
+        }
+    }
+}
+
+const INGRESS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const INGRESS_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(180);
+
+const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
+    matches!(
+        result,
+        Ok(ReconcileOutcome::Applied(_)) | Err(RobotLBError::SkipService)
+    )
+}
+
 /// Reconcile the service.
 ///
 /// This function is called by the controller for each service.
@@ -97,19 +125,25 @@ pub async fn reconcile_service(
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
     let result = reconcile_service_inner(svc.clone(), context.clone()).await;
+    context
+        .memo
+        .settle(&svc, matches!(result, Ok(ReconcileOutcome::Applied(_))));
+    if should_reset_failure_backoff(&result) {
+        context.error_backoff.forget(&service_key(&svc));
+    }
     if let Err(error) = &result
         && !matches!(error, RobotLBError::SkipService)
     {
         timer.set_failed();
         publish_reconciliation_warning(&svc, &context, error).await;
     }
-    result
+    result.map(ReconcileOutcome::into_action)
 }
 
 async fn reconcile_service_inner(
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
-) -> RobotLBResult<Action> {
+) -> RobotLBResult<ReconcileOutcome> {
     if !context.is_leader.load(Ordering::Relaxed) {
         return Err(RobotLBError::SkipService);
     }
@@ -118,7 +152,7 @@ async fn reconcile_service_inner(
             ?delay,
             "Hetzner API rate limit pause; skipping reconciliation"
         );
-        return Ok(Action::requeue(delay));
+        return Ok(ReconcileOutcome::Deferred(Action::requeue(delay)));
     }
 
     // Release resources even if a Service changed its type/class, and even if
@@ -128,7 +162,7 @@ async fn reconcile_service_inner(
     {
         LoadBalancer::cleanup_service(&svc, &context).await?;
         finalizers::remove(context.client.clone(), &svc).await?;
-        return Ok(Action::await_change());
+        return Ok(ReconcileOutcome::Applied(Action::await_change()));
     }
 
     ensure_service_is_supported(&svc)?;
@@ -142,6 +176,11 @@ async fn reconcile_service_inner(
     }
 
     reconcile_load_balancer(lb, svc, context).await
+}
+
+fn service_key(svc: &Service) -> String {
+    svc.uid()
+        .unwrap_or_else(|| format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any()))
 }
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
@@ -189,10 +228,10 @@ async fn publish_reconciliation_warning(
 }
 
 const fn warning_reason(error: &RobotLBError) -> &'static str {
-    if matches!(error, RobotLBError::InvalidLoadBalancerConfiguration(_)) {
-        "InvalidLoadBalancerConfiguration"
-    } else {
-        "SyncLoadBalancerFailed"
+    match error {
+        RobotLBError::InvalidLoadBalancerConfiguration(_) => "InvalidLoadBalancerConfiguration",
+        RobotLBError::LoadBalancerProvisioningTimeout => "LoadBalancerProvisioningTimeout",
+        _ => "SyncLoadBalancerFailed",
     }
 }
 
@@ -218,11 +257,11 @@ fn event_note(error: &RobotLBError, token: &str) -> String {
 /// # Errors
 ///
 /// Returns an error if node discovery fails, or if the Kubernetes/Hetzner API call fails.
-pub async fn reconcile_load_balancer(
+async fn reconcile_load_balancer(
     mut lb: LoadBalancer,
     svc: Arc<Service>,
     context: Arc<CurrentContext>,
-) -> RobotLBResult<Action> {
+) -> RobotLBResult<ReconcileOutcome> {
     let desired_ip_type = node_ip_type(&lb);
 
     let nodes = discover_target_nodes(&svc, &context).await?;
@@ -239,6 +278,19 @@ pub async fn reconcile_load_balancer(
 
     apply_desired_state(&mut lb, desired_targets, desired_services);
 
+    let uid = svc.uid();
+    let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
+    if let Some((wait, ingress)) = uid.as_deref().and_then(|uid| {
+        context
+            .memo
+            .unchanged(uid, fingerprint, std::time::Instant::now())
+    }) {
+        tracing::debug!("No effective configuration change; skipping Hetzner API");
+        // Status is not part of the fingerprint: repair it without Hetzner calls.
+        patch_ingress_status(&svc, &context, ingress).await?;
+        return Ok(ReconcileOutcome::Applied(Action::requeue(wait)));
+    }
+
     let hcloud_lb = lb.reconcile().await?;
 
     let ingress = build_ingress(
@@ -247,32 +299,85 @@ pub async fn reconcile_load_balancer(
         lb.proxy_mode,
         lb.public_interface,
     );
-    patch_ingress_status(&svc, &context, ingress).await?;
-
-    Ok(Action::requeue(Duration::from_secs(SUCCESS_REQUEUE_SECS)))
-}
-
-/// Handle the error during reconciliation.
-#[allow(clippy::needless_pass_by_value)]
-pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
-    if error.is_rate_limited() {
-        let delay = context.rate_limit.on_rate_limit(std::time::Instant::now());
-        tracing::warn!(
-            ?delay,
-            "Hetzner API rate limit reached; pausing all Services"
+    // Hetzner may acknowledge creation or network attachment before assigning an
+    // address. A successful API response is not a complete LoadBalancer reconcile
+    // until Kubernetes can advertise an ingress address. In particular, never
+    // memoize an empty result and postpone address discovery for five minutes.
+    if should_retry_missing_ingress(&ingress) {
+        if uid.as_deref().is_some_and(|uid| {
+            context.memo.missing_ingress_overdue(
+                uid,
+                fingerprint,
+                std::time::Instant::now(),
+                INGRESS_PROVISIONING_TIMEOUT,
+            )
+        }) {
+            return Err(RobotLBError::LoadBalancerProvisioningTimeout);
+        }
+        tracing::info!(
+            service = %svc.name_any(),
+            "Load balancer has no ingress address yet; retrying shortly"
         );
-        return Action::requeue(delay);
+        return Ok(ReconcileOutcome::Deferred(Action::requeue(
+            INGRESS_RETRY_INTERVAL,
+        )));
     }
-    action_for_error(error)
+    patch_ingress_status(&svc, &context, ingress.clone()).await?;
+    if let Some(uid) = uid.as_deref() {
+        context.memo.clear_pending(uid);
+    }
+
+    let resync = Duration::from_secs(context.config.resync_interval);
+    if let Some(uid) = uid {
+        context.memo.record(
+            &uid,
+            fingerprint,
+            std::time::Instant::now(),
+            resync,
+            ingress,
+        );
+    }
+    Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
 }
 
-const fn action_for_error(error: &RobotLBError) -> Action {
+const fn should_retry_missing_ingress(
+    ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress],
+) -> bool {
+    ingress.is_empty()
+}
+
+/// Schedule failures independently, but pause the entire project on rate limits.
+#[allow(clippy::needless_pass_by_value)]
+pub fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
+    error_action(
+        error,
+        &context.rate_limit,
+        &context.error_backoff,
+        std::time::Instant::now(),
+        &service_key(&svc),
+    )
+}
+
+fn error_action(
+    error: &RobotLBError,
+    rate_limit: &crate::rate_limit::RateLimitGate,
+    backoff: &crate::backoff::ErrorBackoff,
+    now: std::time::Instant,
+    service: &str,
+) -> Action {
     match error {
         RobotLBError::SkipService => Action::await_change(),
-        RobotLBError::InvalidLoadBalancerConfiguration(_) => {
-            Action::requeue(Duration::from_secs(180))
+        // Provisioning keeps a fixed polling interval even after emitting an error.
+        RobotLBError::LoadBalancerProvisioningTimeout => Action::requeue(INGRESS_RETRY_INTERVAL),
+        error if error.is_rate_limited() => {
+            let delay = rate_limit.on_rate_limit(now);
+            tracing::warn!(
+                ?delay,
+                "Hetzner API rate limit reached; pausing all Services"
+            );
+            Action::requeue(delay)
         }
-        _ => Action::requeue(Duration::from_secs(30)),
+        _ => Action::requeue(backoff.on_failure(service, now)),
     }
 }
 
@@ -292,6 +397,85 @@ pub fn map_endpoint_slice_to_service(
     Some(ObjectRef::new(&service_name).within(&namespace))
 }
 
+/// Whether an `EndpointSlice` change can move the nodes selected by a Service.
+/// Preserve Pod-based Local discovery rather than switching to `EndpointSlice` readiness.
+fn slice_target_mode(svc: &Service, dynamic_node_selector: bool) -> Option<SliceTargetMode> {
+    if !dynamic_node_selector || ensure_service_is_supported(svc).is_err() {
+        return None;
+    }
+    let spec = svc.spec.as_ref()?;
+    if spec.external_traffic_policy.as_deref() != Some("Local") {
+        return None;
+    }
+    Some(
+        if spec
+            .selector
+            .as_ref()
+            .is_some_and(|selector| !selector.is_empty())
+        {
+            SliceTargetMode::PodNodes
+        } else {
+            SliceTargetMode::ReadyEndpointNodes
+        },
+    )
+}
+
+/// Wake all Services when target-relevant Nodes change or an observed
+/// `EndpointSlice` disappears or changes its Service label.
+/// Ordinary endpoint changes use the targeted mapper.
+fn node_change_signals(
+    client: kube::Client,
+    slice_changes: Arc<SliceChanges>,
+) -> impl futures::Stream<Item = ()> + Send + Sync {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    let node_sender = sender.clone();
+    let node_client = client.clone();
+    tokio::spawn(async move {
+        let mut changes = node_changes::NodeChanges::default();
+        let mut events = std::pin::pin!(
+            watcher::watcher(
+                kube::Api::<k8s_openapi::api::core::v1::Node>::all(node_client),
+                watcher::Config::default(),
+            )
+            .default_backoff()
+        );
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    if changes.observe(&event) && node_sender.unbounded_send(()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Node watch failed"),
+            }
+        }
+    });
+
+    // kube-runtime's watch mapper receives an object but not the event kind.
+    // A cheap second watch on only EndpointSlice metadata ensures deletion
+    // events (and deletions during relists) cannot leave stale target nodes.
+    tokio::spawn(async move {
+        let mut events = std::pin::pin!(
+            watcher::metadata_watcher(
+                kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(client),
+                watcher::Config::default(),
+            )
+            .default_backoff()
+        );
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    if slice_changes.track(&event) && sender.unbounded_send(()).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "EndpointSlice metadata watch failed"),
+            }
+        }
+    });
+    receiver
+}
+
 /// Create and run the controller.
 pub async fn run(
     kube_client: kube::Client,
@@ -300,48 +484,69 @@ pub async fn run(
 ) {
     let controller_shutdown = shutdown.clone();
     let hcloud_token = context.config.hcloud_token.clone();
-    Controller::new(
+    let controller = Controller::new(
         kube::Api::<Service>::all(kube_client),
         watcher::Config::default(),
-    )
-    .watches(
-        kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(context.client.clone()),
-        watcher::Config::default(),
-        |endpoint_slice| map_endpoint_slice_to_service(&endpoint_slice),
-    )
-    .run(reconcile_service, on_error, context)
-    .take_until(controller_shutdown.cancelled())
-    .for_each(|reconciliation_result| {
-        let token = hcloud_token.clone();
-        async move {
-            match reconciliation_result {
-                Ok((service, _action)) => {
-                    tracing::info!(
-                        "Reconciliation of a service {} was successful",
-                        service.name
-                    );
+    );
+    let services = controller.store();
+    let slice_changes = Arc::new(SliceChanges::default());
+    let dynamic_node_selector = context.config.dynamic_node_selector;
+    controller
+        .reconcile_all_on(node_change_signals(
+            context.client.clone(),
+            slice_changes.clone(),
+        ))
+        .watches(
+            kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(
+                context.client.clone(),
+            ),
+            watcher::Config::default(),
+            move |endpoint_slice| {
+                let service_ref = map_endpoint_slice_to_service(&endpoint_slice)?;
+                let service = services.get(&service_ref)?;
+                match slice_target_mode(&service, dynamic_node_selector) {
+                    Some(mode) if slice_changes.observe(&endpoint_slice, mode) => Some(service_ref),
+                    Some(_) => None,
+                    None => {
+                        slice_changes.forget(&endpoint_slice);
+                        None
+                    }
                 }
-                Err(kube::runtime::controller::Error::ReconcilerFailed(
-                    RobotLBError::SkipService,
-                    _,
-                )) => {}
-                Err(kube::runtime::controller::Error::ReconcilerFailed(error, service)) => {
-                    tracing::error!(
-                        service = %service,
-                        error = %crate::error::redact(&error.to_string(), &token),
-                        "Service reconciliation failed"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        error = %crate::error::redact(&error.to_string(), &token),
-                        "Controller reconciliation failed"
-                    );
+            },
+        )
+        .run(reconcile_service, on_error, context)
+        .take_until(controller_shutdown.cancelled())
+        .for_each(|reconciliation_result| {
+            let token = hcloud_token.clone();
+            async move {
+                match reconciliation_result {
+                    Ok((service, _action)) => {
+                        tracing::info!(
+                            "Reconciliation of a service {} was successful",
+                            service.name
+                        );
+                    }
+                    Err(kube::runtime::controller::Error::ReconcilerFailed(
+                        RobotLBError::SkipService,
+                        _,
+                    )) => {}
+                    Err(kube::runtime::controller::Error::ReconcilerFailed(error, service)) => {
+                        tracing::error!(
+                            service = %service,
+                            error = %crate::error::redact(&error.to_string(), &token),
+                            "Service reconciliation failed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            error = %crate::error::redact(&error.to_string(), &token),
+                            "Controller reconciliation failed"
+                        );
+                    }
                 }
             }
-        }
-    })
-    .await;
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -403,24 +608,105 @@ mod tests {
     }
 
     #[test]
-    fn on_error_awaits_change_for_skipped_service() {
-        let action = action_for_error(&RobotLBError::SkipService);
-        assert_eq!(action, Action::await_change());
+    fn deferred_reconciliations_preserve_backoff() {
+        let rate_limit = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let now = std::time::Instant::now();
+        let svc = "shop/web";
+        let error = RobotLBError::HCloudError("temporary outage".to_string());
+        let first = error_action(&error, &rate_limit, &backoff, now, svc);
+        assert_eq!(first, Action::requeue(Duration::from_secs(5)));
+        let delayed = Ok(ReconcileOutcome::Deferred(Action::requeue(
+            Duration::from_secs(60),
+        )));
+        assert!(!should_reset_failure_backoff(&delayed));
+        // This is the exact shared-429 deferral path: it must not call forget().
+        if should_reset_failure_backoff(&delayed) {
+            backoff.forget(svc);
+        }
+        assert_eq!(
+            error_action(&error, &rate_limit, &backoff, now, svc),
+            Action::requeue(Duration::from_secs(10))
+        );
+        assert!(should_reset_failure_backoff(&Ok(
+            ReconcileOutcome::Applied(Action::await_change())
+        )));
+        assert!(should_reset_failure_backoff(&Err(
+            RobotLBError::SkipService
+        )));
+        assert!(!should_reset_failure_backoff(&Err(error)));
     }
 
     #[test]
-    fn invalid_configuration_requeues_less_frequently() {
+    fn provisioning_timeout_emits_a_warning_and_keeps_a_fixed_retry() {
+        let gate = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let error = RobotLBError::LoadBalancerProvisioningTimeout;
+        assert_eq!(warning_reason(&error), "LoadBalancerProvisioningTimeout");
         assert_eq!(
-            action_for_error(&RobotLBError::InvalidLoadBalancerConfiguration(
-                "test".to_string()
-            )),
-            Action::requeue(Duration::from_secs(180))
+            error_action(
+                &error,
+                &gate,
+                &backoff,
+                std::time::Instant::now(),
+                "shop/web"
+            ),
+            Action::requeue(INGRESS_RETRY_INTERVAL)
         );
     }
 
     #[test]
-    fn on_error_requeues_for_non_skip_errors() {
-        let action = action_for_error(&RobotLBError::ServiceWithoutSelector);
-        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    fn an_unassigned_lb_address_is_not_considered_reconciled() {
+        // Neither a new public balancer nor a private network attachment should
+        // be cached while Hetzner has not returned a routable ingress address.
+        assert!(should_retry_missing_ingress(&[]));
+        let ingress = vec![k8s_openapi::api::core::v1::LoadBalancerIngress {
+            ip: Some("192.0.2.2".to_string()),
+            ..Default::default()
+        }];
+        assert!(!should_retry_missing_ingress(&ingress));
+    }
+
+    #[test]
+    fn slice_watches_are_only_used_for_dynamic_local_targets() {
+        let mut svc = service_with_spec(service_spec("LoadBalancer", None, vec![]));
+        assert_eq!(slice_target_mode(&svc, true), None);
+        svc.spec.as_mut().unwrap().external_traffic_policy = Some("Local".to_string());
+        assert_eq!(
+            slice_target_mode(&svc, true),
+            Some(SliceTargetMode::ReadyEndpointNodes)
+        );
+        svc.spec.as_mut().unwrap().selector = Some([("app".to_string(), "web".to_string())].into());
+        assert_eq!(
+            slice_target_mode(&svc, true),
+            Some(SliceTargetMode::PodNodes)
+        );
+        assert_eq!(slice_target_mode(&svc, false), None);
+        svc.spec.as_mut().unwrap().load_balancer_class = Some("other".to_string());
+        assert_eq!(slice_target_mode(&svc, true), None);
+    }
+
+    #[test]
+    fn failure_backoff_is_independent_for_each_service() {
+        let gate = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let now = std::time::Instant::now();
+        let error = RobotLBError::HCloudError("test".to_string());
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(5))
+        );
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(10))
+        );
+        assert_eq!(
+            error_action(&error, &gate, &backoff, now, "shop/api"),
+            Action::requeue(Duration::from_secs(5))
+        );
+        assert_eq!(
+            error_action(&RobotLBError::SkipService, &gate, &backoff, now, "shop/web"),
+            Action::await_change()
+        );
     }
 }

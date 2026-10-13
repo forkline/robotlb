@@ -41,6 +41,7 @@ use crate::{
     metrics::Metrics,
 };
 
+pub mod backoff;
 pub mod config;
 pub mod consts;
 pub mod controller;
@@ -49,6 +50,7 @@ pub mod finalizers;
 pub mod health;
 pub mod label_filter;
 pub mod lb;
+pub mod memo;
 pub mod metrics;
 pub mod otel_tracing;
 pub mod prometheus_exporter;
@@ -72,6 +74,10 @@ pub struct CurrentContext {
     pub metrics: Arc<Metrics>,
     /// Hetzner project-wide API throttle shared across all Services.
     pub rate_limit: Arc<rate_limit::RateLimitGate>,
+    /// Failure backoff scoped to each Service UID.
+    pub error_backoff: Arc<backoff::ErrorBackoff>,
+    /// Remember successful desired state to skip redundant Hetzner requests.
+    pub memo: Arc<memo::ReconcileMemo>,
     /// Suppress repeated identical Kubernetes Warning Events.
     pub(crate) event_throttle: Arc<controller::EventThrottle>,
 }
@@ -93,6 +99,8 @@ impl CurrentContext {
             is_leader,
             metrics,
             rate_limit: Arc::default(),
+            error_backoff: Arc::default(),
+            memo: Arc::default(),
             event_throttle: Arc::default(),
         }
     }

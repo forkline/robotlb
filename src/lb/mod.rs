@@ -30,6 +30,7 @@ use crate::{
 };
 
 pub(crate) use api::{HcloudLoadBalancerApi, LiveHcloudLoadBalancerApi};
+pub use config::parse_cluster_name;
 pub(crate) use config::parse_load_balancer_config;
 use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service_matches_desired};
 
