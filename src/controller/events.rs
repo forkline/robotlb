@@ -3,8 +3,8 @@
 use super::event_throttle::EventKey;
 use crate::{CurrentContext, error::RobotLBError};
 use k8s_openapi::api::core::v1::Service;
-use kube::{Resource, ResourceExt};
 use kube::runtime::events::{Event, EventType};
+use kube::{Resource, ResourceExt};
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
 /// Event publishing errors must not hide the original reconciliation failure.
