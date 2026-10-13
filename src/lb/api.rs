@@ -309,15 +309,7 @@ pub async fn create_load_balancer(
     )
     .await;
 
-    match response {
-        Ok(created) => Ok(*created.load_balancer),
-        Err(e) => {
-            tracing::error!("Failed to create load balancer: {:?}", e);
-            Err(RobotLBError::HCloudError(format!(
-                "Failed to create load balancer: {e:?}"
-            )))
-        }
-    }
+    Ok(*response?.load_balancer)
 }
 
 /// Delete a load balancer.

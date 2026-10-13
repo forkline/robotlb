@@ -90,6 +90,10 @@ pub async fn reconcile_service(
     if !context.is_leader.load(Ordering::Relaxed) {
         return Err(RobotLBError::SkipService);
     }
+    if let Some(delay) = context.rate_limit.remaining(std::time::Instant::now()) {
+        tracing::debug!(?delay, "Hetzner API rate limit pause; skipping reconciliation");
+        return Ok(Action::requeue(delay));
+    }
 
     // Release resources even if a Service changed its type/class, and even if
     // configuration annotations have become invalid.
@@ -175,7 +179,12 @@ pub async fn reconcile_load_balancer(
 
 /// Handle the error during reconciliation.
 #[allow(clippy::needless_pass_by_value)]
-pub fn on_error(_: Arc<Service>, error: &RobotLBError, _context: Arc<CurrentContext>) -> Action {
+pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
+    if error.is_rate_limited() {
+        let delay = context.rate_limit.on_rate_limit(std::time::Instant::now());
+        tracing::warn!(?delay, "Hetzner API rate limit reached; pausing all Services");
+        return Action::requeue(delay);
+    }
     action_for_error(error)
 }
 

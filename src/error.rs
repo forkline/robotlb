@@ -9,6 +9,10 @@ use thiserror::Error;
 /// Result type alias for robotlb operations.
 pub type RobotLBResult<T> = Result<T, RobotLBError>;
 
+fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
+    matches!(err, hcloud::apis::Error::ResponseError(response) if response.status.as_u16() == 429)
+}
+
 /// All possible errors that can occur in the robotlb operator.
 #[derive(Debug, Error)]
 pub enum RobotLBError {
@@ -93,4 +97,27 @@ pub enum RobotLBError {
     ),
     #[error("{0}")]
     Generic(String),
+}
+
+impl RobotLBError {
+    /// Whether Hetzner rejected an operation due to the project-wide request quota.
+    pub fn is_rate_limited(&self) -> bool {
+        match self {
+            Self::HCloudLBAttachToNetworkError(e) => is_rate_limit(e),
+            Self::HCloudLBDetachFromNetworkError(e) => is_rate_limit(e),
+            Self::HcloudLBAddTargetError(e) => is_rate_limit(e),
+            Self::HcloudLBRemoveTargetError(e) => is_rate_limit(e),
+            Self::HcloudLBAddServiceError(e) => is_rate_limit(e),
+            Self::HcloudLBRemoveServiceError(e) => is_rate_limit(e),
+            Self::HcloudLBCreateError(e) => is_rate_limit(e),
+            Self::HcloudLBDeleteError(e) => is_rate_limit(e),
+            Self::HcloudLBGetError(e) => is_rate_limit(e),
+            Self::HcloudLBUpdateServiceError(e) => is_rate_limit(e),
+            Self::HcloudLBChangeType(e) => is_rate_limit(e),
+            Self::HcloudLBChangeAlgorithm(e) => is_rate_limit(e),
+            Self::HcloudListNetworksError(e) => is_rate_limit(e),
+            Self::HcloudListLoadBalancersError(e) => is_rate_limit(e),
+            _ => false,
+        }
+    }
 }
