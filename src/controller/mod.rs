@@ -93,11 +93,11 @@ pub async fn reconcile_service(
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
     let result = reconcile_service_inner(svc.clone(), context.clone()).await;
-    if let Err(error) = &result {
-        if !matches!(error, RobotLBError::SkipService) {
-            timer.set_failed();
-            publish_reconciliation_warning(&svc, &context, error).await;
-        }
+    if let Err(error) = &result
+        && !matches!(error, RobotLBError::SkipService)
+    {
+        timer.set_failed();
+        publish_reconciliation_warning(&svc, &context, error).await;
     }
     result
 }
@@ -110,7 +110,10 @@ async fn reconcile_service_inner(
         return Err(RobotLBError::SkipService);
     }
     if let Some(delay) = context.rate_limit.remaining(std::time::Instant::now()) {
-        tracing::debug!(?delay, "Hetzner API rate limit pause; skipping reconciliation");
+        tracing::debug!(
+            ?delay,
+            "Hetzner API rate limit pause; skipping reconciliation"
+        );
         return Ok(Action::requeue(delay));
     }
 
@@ -294,7 +297,10 @@ pub async fn run(
         async move {
             match reconciliation_result {
                 Ok((service, _action)) => {
-                    tracing::info!("Reconciliation of a service {} was successful", service.name);
+                    tracing::info!(
+                        "Reconciliation of a service {} was successful",
+                        service.name
+                    );
                 }
                 Err(kube::runtime::controller::Error::ReconcilerFailed(
                     RobotLBError::SkipService,
