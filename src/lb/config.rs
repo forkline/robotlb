@@ -191,6 +191,7 @@ mod tests {
             cluster_name: None,
             default_network: Some("default-net".to_string()),
             dynamic_node_selector: true,
+            resync_interval: 300,
             default_lb_retries: 3,
             default_lb_timeout: 10,
             default_lb_interval: 15,
