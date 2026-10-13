@@ -139,6 +139,10 @@ fn default_name(cluster: Option<&str>, service: &str, namespace: &str) -> String
 }
 
 /// Validate the DNS-label cluster prefix at startup instead of failing on an API call.
+///
+/// # Errors
+///
+/// Returns an error if the name is not a valid DNS label.
 pub fn parse_cluster_name(value: &str) -> Result<String, String> {
     let ascii_alnum = |ch: char| ch.is_ascii_lowercase() || ch.is_ascii_digit();
     let valid = (1..=63).contains(&value.len())
