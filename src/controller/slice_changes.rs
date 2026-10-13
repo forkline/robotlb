@@ -25,6 +25,15 @@ fn key<K: Resource>(slice: &K) -> SliceKey {
     (slice.namespace().unwrap_or_default(), slice.name_any())
 }
 
+fn owner<K: Resource>(slice: &K) -> Option<String> {
+    slice
+        .meta()
+        .labels
+        .as_ref()?
+        .get("kubernetes.io/service-name")
+        .cloned()
+}
+
 fn target_nodes(slice: &EndpointSlice, mode: SliceTargetMode) -> BTreeSet<String> {
     slice
         .endpoints
@@ -44,8 +53,8 @@ fn target_nodes(slice: &EndpointSlice, mode: SliceTargetMode) -> BTreeSet<String
 #[derive(Debug, Default)]
 struct State {
     observed: HashMap<SliceKey, BTreeSet<String>>,
-    live: HashSet<SliceKey>,
-    relisted: HashSet<SliceKey>,
+    live: HashMap<SliceKey, Option<String>>,
+    relisted: HashMap<SliceKey, Option<String>>,
 }
 
 /// A shared cache for the controller's `EndpointSlice` mapper and the deletion watch.
@@ -82,7 +91,7 @@ impl SliceChanges {
                 false
             }
             Event::InitApply(slice) => {
-                state.relisted.insert(key(slice));
+                state.relisted.insert(key(slice), owner(slice));
                 false
             }
             Event::InitDone => {
@@ -90,14 +99,31 @@ impl SliceChanges {
                 let removed = state
                     .observed
                     .iter()
-                    .any(|(name, nodes)| !live.contains(name) && !nodes.is_empty());
-                state.observed.retain(|name, _| live.contains(name));
+                    .any(|(name, nodes)| !live.contains_key(name) && !nodes.is_empty());
+                // A relist may be the only evidence of a Service label change.
+                let changed: HashSet<_> = live
+                    .iter()
+                    .filter(|(name, next)| state.live.get(*name).is_some_and(|old| old != *next))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                state
+                    .observed
+                    .retain(|name, _| live.contains_key(name) && !changed.contains(name));
                 state.live = live;
-                removed
+                removed || !changed.is_empty()
             }
             Event::Apply(slice) => {
-                state.live.insert(key(slice));
-                false
+                let name = key(slice);
+                let next = owner(slice);
+                let changed = state
+                    .live
+                    .insert(name.clone(), next.clone())
+                    .is_some_and(|old| old != next);
+                if changed {
+                    // The main watch may not see a node-set change for the new owner.
+                    state.observed.remove(&name);
+                }
+                changed
             }
             Event::Delete(slice) => {
                 let name = key(slice);
@@ -190,6 +216,51 @@ mod tests {
         let initial = slice(false, "node-a");
         changes.observe(&initial, SliceTargetMode::ReadyEndpointNodes);
         assert!(!changes.track(&Event::Delete(initial)));
+    }
+
+    fn with_owner(mut slice: EndpointSlice, service: Option<&str>) -> EndpointSlice {
+        slice.metadata.labels = service.map(|name| {
+            [("kubernetes.io/service-name".to_string(), name.to_string())].into()
+        });
+        slice
+    }
+
+    #[test]
+    fn relabeling_a_slice_wakes_old_and_new_service_even_with_unchanged_nodes() {
+        let changes = SliceChanges::default();
+        let first = with_owner(slice(true, "node-a"), Some("service-a"));
+        changes.observe(&first, SliceTargetMode::ReadyEndpointNodes);
+        changes.track(&Event::<EndpointSlice>::Init);
+        changes.track(&Event::InitApply(first.clone()));
+        assert!(!changes.track(&Event::<EndpointSlice>::InitDone));
+
+        let second = with_owner(first.clone(), Some("service-b"));
+        // Main watch may get the event before the metadata watch.
+        assert!(!changes.observe(&second, SliceTargetMode::ReadyEndpointNodes));
+        assert!(changes.track(&Event::Apply(second.clone())));
+        assert!(changes.observe(&second, SliceTargetMode::ReadyEndpointNodes));
+        assert!(!changes.track(&Event::Apply(second.clone())));
+
+        // Losing the owner label must also wake the previous Service.
+        assert!(changes.track(&Event::Apply(with_owner(second, None))));
+    }
+
+    #[test]
+    fn relist_detects_service_reassignment_without_endpoint_changes() {
+        let changes = SliceChanges::default();
+        let first = with_owner(slice(true, "node-a"), Some("service-a"));
+        changes.observe(&first, SliceTargetMode::ReadyEndpointNodes);
+        changes.track(&Event::<EndpointSlice>::Init);
+        changes.track(&Event::InitApply(first.clone()));
+        assert!(!changes.track(&Event::<EndpointSlice>::InitDone));
+
+        changes.track(&Event::<EndpointSlice>::Init);
+        changes.track(&Event::InitApply(with_owner(first.clone(), Some("service-b"))));
+        assert!(changes.track(&Event::<EndpointSlice>::InitDone));
+        assert!(changes.observe(
+            &with_owner(first, Some("service-b")),
+            SliceTargetMode::ReadyEndpointNodes
+        ));
     }
 
     #[test]
