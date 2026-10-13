@@ -4,6 +4,7 @@
 //! with the `robotlb` load balancer class.
 
 mod event_throttle;
+mod node_changes;
 mod nodes;
 mod status;
 
@@ -16,6 +17,7 @@ use std::{
 };
 
 use futures::StreamExt;
+use crate::memo;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
     Resource, ResourceExt,
@@ -24,7 +26,7 @@ use kube::{
         controller::Action,
         events::{Event, EventType, Recorder, Reporter},
         reflector::ObjectRef,
-        watcher,
+        watcher, WatchStreamExt,
     },
 };
 
@@ -41,7 +43,7 @@ pub(crate) use nodes::{
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
 
-const SUCCESS_REQUEUE_SECS: u64 = 180;
+const SUCCESS_REQUEUE_SECS: u64 = 300;
 
 /// Check if a service is supported by robotlb.
 ///
@@ -97,6 +99,10 @@ pub async fn reconcile_service(
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
     let result = reconcile_service_inner(svc.clone(), context.clone()).await;
+    context.memo.settle(&svc, result.is_ok());
+    if matches!(result, Ok(_) | Err(RobotLBError::SkipService)) {
+        context.error_backoff.forget(&service_key(&svc));
+    }
     if let Err(error) = &result
         && !matches!(error, RobotLBError::SkipService)
     {
@@ -142,6 +148,12 @@ async fn reconcile_service_inner(
     }
 
     reconcile_load_balancer(lb, svc, context).await
+}
+
+fn service_key(svc: &Service) -> String {
+    svc.uid().unwrap_or_else(|| {
+        format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())
+    })
 }
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
@@ -239,6 +251,16 @@ pub async fn reconcile_load_balancer(
 
     apply_desired_state(&mut lb, desired_targets, desired_services);
 
+    let uid = svc.uid();
+    let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
+    if let Some(wait) = uid
+        .as_deref()
+        .and_then(|uid| context.memo.unchanged(uid, fingerprint, std::time::Instant::now()))
+    {
+        tracing::debug!("No effective configuration change; skipping Hetzner API");
+        return Ok(Action::requeue(wait));
+    }
+
     let hcloud_lb = lb.reconcile().await?;
 
     let ingress = build_ingress(
@@ -249,12 +271,16 @@ pub async fn reconcile_load_balancer(
     );
     patch_ingress_status(&svc, &context, ingress).await?;
 
-    Ok(Action::requeue(Duration::from_secs(SUCCESS_REQUEUE_SECS)))
+    let resync = Duration::from_secs(context.config.resync_interval);
+    if let Some(uid) = uid {
+        context.memo.record(&uid, fingerprint, std::time::Instant::now(), resync);
+    }
+    Ok(Action::requeue(resync))
 }
 
 /// Handle the error during reconciliation.
 #[allow(clippy::needless_pass_by_value)]
-pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
+pub fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
     if error.is_rate_limited() {
         let delay = context.rate_limit.on_rate_limit(std::time::Instant::now());
         tracing::warn!(
@@ -263,7 +289,14 @@ pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentConte
         );
         return Action::requeue(delay);
     }
-    action_for_error(error)
+    if matches!(error, RobotLBError::SkipService) {
+        return Action::await_change();
+    }
+    Action::requeue(
+        context
+            .error_backoff
+            .on_failure(&service_key(&svc), std::time::Instant::now()),
+    )
 }
 
 const fn action_for_error(error: &RobotLBError) -> Action {
