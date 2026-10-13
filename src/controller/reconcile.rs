@@ -36,10 +36,10 @@ impl ReconcileOutcome {
     }
 }
 
-const INGRESS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+pub(super) const INGRESS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const INGRESS_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(180);
 
-const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
+pub(super) const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
     matches!(
         result,
         Ok(ReconcileOutcome::Synced(_) | ReconcileOutcome::Unchanged(_) | ReconcileOutcome::Deleted(_)) | Err(RobotLBError::SkipService)
@@ -211,7 +211,7 @@ async fn reconcile_load_balancer(
     Ok(ReconcileOutcome::Synced(Action::requeue(resync)))
 }
 
-const fn should_retry_missing_ingress(
+pub(super) const fn should_retry_missing_ingress(
     ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress],
 ) -> bool {
     ingress.is_empty()
@@ -229,7 +229,7 @@ pub(super) fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<Cur
     )
 }
 
-fn error_action(
+pub(super) fn error_action(
     error: &RobotLBError,
     rate_limit: &crate::rate_limit::RateLimitGate,
     backoff: &crate::backoff::ErrorBackoff,
