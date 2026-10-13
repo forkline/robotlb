@@ -43,7 +43,6 @@ pub(crate) use nodes::{
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
 
-const SUCCESS_REQUEUE_SECS: u64 = 300;
 
 /// Check if a service is supported by robotlb.
 ///
@@ -278,34 +277,28 @@ pub async fn reconcile_load_balancer(
     Ok(Action::requeue(resync))
 }
 
-/// Handle the error during reconciliation.
+/// Schedule failures independently, but pause the entire project on rate limits.
 #[allow(clippy::needless_pass_by_value)]
 pub fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
-    if error.is_rate_limited() {
-        let delay = context.rate_limit.on_rate_limit(std::time::Instant::now());
-        tracing::warn!(
-            ?delay,
-            "Hetzner API rate limit reached; pausing all Services"
-        );
-        return Action::requeue(delay);
-    }
-    if matches!(error, RobotLBError::SkipService) {
-        return Action::await_change();
-    }
-    Action::requeue(
-        context
-            .error_backoff
-            .on_failure(&service_key(&svc), std::time::Instant::now()),
-    )
+    error_action(error, &context.rate_limit, &context.error_backoff,
+        std::time::Instant::now(), &service_key(&svc))
 }
 
-const fn action_for_error(error: &RobotLBError) -> Action {
+fn error_action(
+    error: &RobotLBError,
+    rate_limit: &crate::rate_limit::RateLimitGate,
+    backoff: &crate::backoff::ErrorBackoff,
+    now: std::time::Instant,
+    service: &str,
+) -> Action {
     match error {
         RobotLBError::SkipService => Action::await_change(),
-        RobotLBError::InvalidLoadBalancerConfiguration(_) => {
-            Action::requeue(Duration::from_secs(180))
+        error if error.is_rate_limited() => {
+            let delay = rate_limit.on_rate_limit(now);
+            tracing::warn!(?delay, "Hetzner API rate limit reached; pausing all Services");
+            Action::requeue(delay)
         }
-        _ => Action::requeue(Duration::from_secs(30)),
+        _ => Action::requeue(backoff.on_failure(service, now)),
     }
 }
 
@@ -436,24 +429,18 @@ mod tests {
     }
 
     #[test]
-    fn on_error_awaits_change_for_skipped_service() {
-        let action = action_for_error(&RobotLBError::SkipService);
-        assert_eq!(action, Action::await_change());
-    }
-
-    #[test]
-    fn invalid_configuration_requeues_less_frequently() {
-        assert_eq!(
-            action_for_error(&RobotLBError::InvalidLoadBalancerConfiguration(
-                "test".to_string()
-            )),
-            Action::requeue(Duration::from_secs(180))
-        );
-    }
-
-    #[test]
-    fn on_error_requeues_for_non_skip_errors() {
-        let action = action_for_error(&RobotLBError::ServiceWithoutSelector);
-        assert_eq!(action, Action::requeue(Duration::from_secs(30)));
+    fn failure_backoff_is_independent_for_each_service() {
+        let gate = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let now = std::time::Instant::now();
+        let error = RobotLBError::HCloudError("test".to_string());
+        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(5)));
+        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/web"),
+            Action::requeue(Duration::from_secs(10)));
+        assert_eq!(error_action(&error, &gate, &backoff, now, "shop/api"),
+            Action::requeue(Duration::from_secs(5)));
+        assert_eq!(error_action(&RobotLBError::SkipService, &gate, &backoff, now, "shop/web"),
+            Action::await_change());
     }
 }
