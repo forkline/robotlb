@@ -500,7 +500,7 @@ impl LoadBalancer {
         else {
             return Ok(());
         };
-        api::delete_load_balancer(&self.hcloud_config, lb.id).await
+        retry_temporary(|| api::delete_load_balancer(&self.hcloud_config, lb.id)).await
     }
 
     /// Release without parsing annotations: malformed config cannot block deletion.
@@ -516,7 +516,7 @@ impl LoadBalancer {
         let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await? else {
             return Ok(());
         };
-        api::delete_load_balancer(&context.hcloud_config, lb.id).await
+        retry_temporary(|| api::delete_load_balancer(&context.hcloud_config, lb.id)).await
     }
 
     /// Existing resources must have the matching Service UID label.
@@ -682,6 +682,48 @@ mod tests {
     use async_trait::async_trait;
     use hcloud::apis::configuration::Configuration as HcloudConfig;
     use std::sync::Mutex;
+
+    fn delete_error(status: u16) -> RobotLBError {
+        RobotLBError::HcloudLBDeleteError(hcloud::apis::Error::ResponseError(
+            hcloud::apis::ResponseContent {
+                status: status.try_into().expect("valid HTTP status"),
+                content: String::new(),
+                entity: None,
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn delete_retries_locked_then_succeeds() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        retry_temporary(|| {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                if attempt == 0 {
+                    Err(delete_error(423))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .expect("second deletion succeeds");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_does_not_retry_permanent_or_rate_limit_errors() {
+        for status in [403, 429] {
+            let attempts = std::sync::atomic::AtomicUsize::new(0);
+            let result: RobotLBResult<()> = retry_temporary(|| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async move { Err(delete_error(status)) }
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
+    }
 
     #[test]
     fn capacity_validation_rejects_oversized_configuration() {
