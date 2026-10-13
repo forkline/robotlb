@@ -2,12 +2,12 @@
 //! Kubelet heartbeats must not trigger reconciling every `LoadBalancer` Service.
 
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
 };
 
 use k8s_openapi::api::core::v1::Node;
-use kube::{runtime::watcher::Event, ResourceExt};
+use kube::{ResourceExt, runtime::watcher::Event};
 
 #[derive(Debug, Default)]
 pub struct NodeChanges {
