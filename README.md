@@ -64,21 +64,6 @@ Match the `app.kubernetes.io/instance` label to your Helm release name. The
 `pod-template-hash` is set by the Deployment controller; do not add it to `podLabels`.
 `topologySpreadConstraints` is optional and defaults to an empty list.
 
-**Migrating from required pod anti-affinity:** Existing pods still enforce their old
-anti-affinity rules until replaced. On a cluster with no spare nodes, use this
-temporary Helm value for the first rollout:
-
-```yaml
-strategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxSurge: 0
-    maxUnavailable: 1
-```
-
-This permits one replica to be unavailable during the rollout. Once all old pods
-are replaced, remove the `strategy` override to restore the Kubernetes default
-rolling-update behavior.
 ## How it works
 
 The operator listens to the Kubernetes API for services of type `LoadBalancer` and creates Hetzner

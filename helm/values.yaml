@@ -14,9 +14,6 @@ fullnameOverride: ""
 
 replicaCount: 1
 
-# Optional Deployment rollout strategy (defaults to Kubernetes RollingUpdate).
-# For the initial migration from required pod anti-affinity on a fully occupied
-# cluster, use maxSurge: 0 and maxUnavailable: 1 to free a node first.
 strategy: {}
 
 envs:
@@ -92,8 +89,6 @@ tolerations: []
 
 affinity: {}
 
-# Optional native Kubernetes topology spread constraints. Use matchLabelKeys:
-# [pod-template-hash] to spread Deployment revisions independently.
 topologySpreadConstraints: []
 
 metrics:
