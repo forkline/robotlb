@@ -95,16 +95,17 @@ impl CurrentContext {
         is_leader: Arc<AtomicBool>,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let recorder = Recorder::new(client.clone(), Reporter {
+            controller: "robotlb".to_string(),
+            instance: None,
+        });
         Self {
             client,
             config,
             hcloud_config,
             is_leader,
             metrics,
-            recorder: Recorder::new(client.clone(), Reporter {
-                controller: "robotlb".to_string(),
-                instance: None,
-            }),
+            recorder,
             rate_limit: Arc::default(),
             error_backoff: Arc::default(),
             memo: Arc::default(),
