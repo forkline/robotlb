@@ -39,9 +39,8 @@ impl ReconcileMemo {
     /// Drop the entry of a service after a failed reconcile, or once robotlb no
     /// longer serves it.
     pub fn settle(&self, svc: &Service, succeeded: bool) {
-        let serves =
-            svc.meta().deletion_timestamp.is_none()
-                && crate::controller::ensure_service_is_supported(svc).is_ok();
+        let serves = svc.meta().deletion_timestamp.is_none()
+            && crate::controller::ensure_service_is_supported(svc).is_ok();
         if !(succeeded && serves)
             && let Some(uid) = svc.uid()
         {
@@ -228,9 +227,8 @@ mod tests {
         svc.spec.as_mut().unwrap().load_balancer_class = Some("other".to_string());
         assert!(!settled(&svc, true));
         let mut svc = service();
-        svc.metadata.deletion_timestamp = Some(
-            k8s_openapi::serde_json::from_str(r#""2026-01-01T00:00:00Z""#).unwrap(),
-        );
+        svc.metadata.deletion_timestamp =
+            Some(k8s_openapi::serde_json::from_str(r#""2026-01-01T00:00:00Z""#).unwrap());
         assert!(!settled(&svc, true));
     }
 
