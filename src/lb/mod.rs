@@ -31,6 +31,7 @@ use crate::{
 
 pub(crate) use api::{HcloudLoadBalancerApi, LiveHcloudLoadBalancerApi};
 pub(crate) use config::parse_load_balancer_config;
+pub use config::parse_cluster_name;
 use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service_matches_desired};
 
 /// Struct representing a load balancer.
