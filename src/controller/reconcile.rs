@@ -6,6 +6,8 @@ use super::{
     ensure_service_is_supported, patch_ingress_status,
 };
 use crate::{
+    consts,
+    lb::DesiredLoadBalancer,
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
     finalizers, memo,
@@ -20,7 +22,6 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use crate::lb::DesiredLoadBalancer;
 
 /// Whether reconciliation completed or intentionally deferred without applying state.
 /// Deferred attempts must not clear the Service's failure backoff or populate the memo.
