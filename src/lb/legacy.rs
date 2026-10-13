@@ -84,14 +84,16 @@ impl LegacyOwnership {
     /// provisioned, UID-owned shell with no traffic-bearing configuration.
     /// A legacy LB must be independently verified before calling this.
     pub(super) fn is_unused_replacement(
-        &self,
         lb: &LoadBalancer,
         uid: &str,
         desired_name: &str,
     ) -> bool {
         lb.name == desired_name
             && lb.labels.len() == 1
-            && lb.labels.get(consts::LB_OWNER_LABEL).is_some_and(|owner| owner == uid)
+            && lb
+                .labels
+                .get(consts::LB_OWNER_LABEL)
+                .is_some_and(|owner| owner == uid)
             && lb.private_net.is_empty()
             && lb.services.is_empty()
             && lb.targets.is_empty()
@@ -274,11 +276,16 @@ mod tests {
     #[test]
     fn adopts_bare_named_private_only_0_6_balancer() {
         let mut svc = service();
-        svc.status.as_mut().unwrap().load_balancer.as_mut().unwrap().ingress =
-            Some(vec![LoadBalancerIngress {
-                ip: Some("172.29.0.1".into()),
-                ..Default::default()
-            }]);
+        svc.status
+            .as_mut()
+            .unwrap()
+            .load_balancer
+            .as_mut()
+            .unwrap()
+            .ingress = Some(vec![LoadBalancerIngress {
+            ip: Some("172.29.0.1".into()),
+            ..Default::default()
+        }]);
         let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
         let mut old_lb = balancer();
         old_lb.name = "web".into();
@@ -295,40 +302,48 @@ mod tests {
     fn only_discards_empty_uid_owned_0_7_replacements() {
         let proof = LegacyOwnership::from_service(&service(), &config()).unwrap();
         let mut replacement = balancer();
-        replacement.labels.insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
+        replacement
+            .labels
+            .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
 
-        assert!(proof.is_unused_replacement(&replacement, "service-uid", "web.default"));
-        assert!(!proof.is_unused_replacement(&replacement, "different-uid", "web.default"));
-        assert!(!proof.is_unused_replacement(&replacement, "service-uid", "other-name"));
+        assert!(LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "different-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "other-name"));
 
         replacement.labels.insert("team".into(), "platform".into());
-        assert!(!proof.is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
         replacement.labels.remove("team");
 
-        replacement.private_net.push(hcloud::models::LoadBalancerPrivateNet::default());
-        assert!(!proof.is_unused_replacement(&replacement, "service-uid", "web.default"));
+        replacement
+            .private_net
+            .push(hcloud::models::LoadBalancerPrivateNet::default());
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
         replacement.private_net.clear();
 
-        replacement.targets.push(hcloud::models::LoadBalancerTarget::default());
-        assert!(!proof.is_unused_replacement(&replacement, "service-uid", "web.default"));
+        replacement
+            .targets
+            .push(hcloud::models::LoadBalancerTarget::default());
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
         replacement.targets.clear();
 
-        replacement.services.push(hcloud::models::LoadBalancerService {
-            http: None,
-            listen_port: 6443,
-            destination_port: 32767,
-            protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
-            proxyprotocol: false,
-            health_check: Box::new(hcloud::models::LoadBalancerServiceHealthCheck {
+        replacement
+            .services
+            .push(hcloud::models::LoadBalancerService {
                 http: None,
-                interval: 15,
-                port: 32767,
-                protocol: hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
-                retries: 3,
-                timeout: 10,
-            }),
-        });
-        assert!(!proof.is_unused_replacement(&replacement, "service-uid", "web.default"));
+                listen_port: 6443,
+                destination_port: 32767,
+                protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
+                proxyprotocol: false,
+                health_check: Box::new(hcloud::models::LoadBalancerServiceHealthCheck {
+                    http: None,
+                    interval: 15,
+                    port: 32767,
+                    protocol: hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
+                    retries: 3,
+                    timeout: 10,
+                }),
+            });
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
     }
 
 }
