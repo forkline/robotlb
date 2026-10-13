@@ -15,7 +15,13 @@ use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
     Resource, ResourceExt,
-    runtime::{Controller, controller::Action, reflector::ObjectRef, watcher, events::{Event, EventType, Recorder, Reporter}},
+    runtime::{
+        Controller,
+        controller::Action,
+        events::{Event, EventType, Recorder, Reporter},
+        reflector::ObjectRef,
+        watcher,
+    },
 };
 
 use crate::{
@@ -228,7 +234,9 @@ pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentConte
 const fn action_for_error(error: &RobotLBError) -> Action {
     match error {
         RobotLBError::SkipService => Action::await_change(),
-        RobotLBError::InvalidLoadBalancerConfiguration(_) => Action::requeue(Duration::from_secs(180)),
+        RobotLBError::InvalidLoadBalancerConfiguration(_) => {
+            Action::requeue(Duration::from_secs(180))
+        }
         _ => Action::requeue(Duration::from_secs(30)),
     }
 }
@@ -324,7 +332,9 @@ mod tests {
     #[test]
     fn invalid_configuration_requeues_less_frequently() {
         assert_eq!(
-            action_for_error(&RobotLBError::InvalidLoadBalancerConfiguration("test".to_string())),
+            action_for_error(&RobotLBError::InvalidLoadBalancerConfiguration(
+                "test".to_string()
+            )),
             Action::requeue(Duration::from_secs(180))
         );
     }
