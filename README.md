@@ -73,35 +73,43 @@ With `ROBOTLB_DYNAMIC_NODE_SELECTOR=true`, target nodes respect the Service's
   excluding unready and excluded nodes.
 
 The controller watches `EndpointSlice` changes and resyncs all Services periodically.
-Every TCP Service port must have an allocated `nodePort`; a Service with no
-exposable ports does not create a billable but unusable balancer.
-Target selection is bounded by the Hetzner load balancer type's capacity.
+At least one TCP Service port must have an allocated `nodePort`; a Service with
+no exposable ports does not create a billable but unusable balancer.
+The number of targets and listeners must fit the chosen Hetzner LB type.
 
-### Upgrading existing load balancers
+### Ownership and safe configuration
 
-**Review this before rolling out the new operator.** Balancers created by this
-version receive the Hetzner label `robotlb/service-uid=<Kubernetes Service UID>`.
-Existing balancers keep their public IPs when the operator can safely adopt them:
-they must have IP-only targets and at least one target matching the Service's nodes.
-The operator adds the ownership label in place and preserves all other labels.
+Every load balancer created by robotlb carries the Hetzner label
+`robotlb/service-uid=<Kubernetes Service UID>`. Only a balancer with the
+matching UID can be reconciled or deleted. Names and overlapping IP targets
+are **not** evidence of ownership.
 
 Without `robotlb/balancer`, new balancers are named
-`<service>.<namespace>`, rather than just `<service>`. The former name is
-checked first for conservative migration. A name collision alone never grants
-ownership. If the existing balancer has no matching targets, it may remain
-unlabelled while a new balancer is created, with a different IP. Audit these cases.
+`<service>.<namespace>`. An unowned balancer using the desired name causes
+reconciliation to fail; robotlb does not adopt or modify it automatically.
+For an existing unlabelled balancer that must retain its IP, **verify the
+ownership manually** before adding the `robotlb/service-uid` label.
+Legacy unlabelled balancers are never deleted by robotlb. Audit them separately
+when upgrading to avoid resource leakage.
 
-**Deletion and type/class changes delete only balancers carrying the matching UID
-label.** An existing unlabelled balancer that was never adopted is left untouched;
-it must be reviewed and cleaned up manually to avoid continued billing.
-List unlabelled balancers with `hcloud load-balancer list --selector '!robotlb/service-uid'`.
-To manually associate a verified balancer, use
-`hcloud load-balancer add-label '<balancer-name>' robotlb/service-uid=<service-uid>`.
-Never label a balancer still owned by another Service or cluster.
+The operator validates the desired Hetzner type's target and listener limits
+before creating an LB or changing its configuration. **It never silently
+truncates the target list and never removes existing healthy targets to
+satisfy an LB type downgrade.** When limits are exceeded or ownership is
+ambiguous, the operation fails without changing an existing load balancer
+and emits a Kubernetes Warning Event on the Service. Reconciliation failures
+are also logged and counted in `robotlb_reconcile_failures_total`; enable
+`metrics.prometheusRules.enabled` to install the chart's optional
+Prometheus reconciliation-failure alert rule, and connect your Alertmanager
+to receive notifications.
 
-If several clusters share one Hetzner project, use explicit, unique balancer
-names to avoid collisions. Set `spec.loadBalancerClass: robotlb` on newly created
-Services to avoid concurrent management by another load balancer controller.
+Use `kubectl describe service -n <namespace> <service>` to inspect
+Warning Events. Choose a larger LB type, reduce the set of eligible
+nodes, or adjust the Service's listener count before retrying.
+
+When multiple clusters share one Hetzner project, use distinct explicit
+names or separate projects. Prefer `spec.loadBalancerClass: robotlb` on
+new Services to avoid competing load-balancer controllers.
 
 ## Configuration
 
@@ -178,8 +186,8 @@ metadata:
     # Whether to keep the public interface enabled. Set this to false for an internal-only load
     # balancer. In that case, the private IP is announced in the Service status.
     robotlb/lb-public-interface: "false"
-    # Node selector for the loadbalancer. This is only required if ROBOTLB_DYNAMIC_NODE_SELECTOR
-    # is set to false. If not specified then, all nodes will be selected as LB targets by default.
+    # Node selector for the loadbalancer. Required when ROBOTLB_DYNAMIC_NODE_SELECTOR
+    # is false; ignored by the dynamic selection mode.
     # This property helps you filter out nodes.
     # Filters are separated by commas and should have one of the following formats:
     # * key=value  -- checks that the node has a label `key` with value `value`;
