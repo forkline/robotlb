@@ -5,14 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.1](https://github.com/forkline/robotlb/tree/0.7.1) - 2026-10-13
-
-### Fixed
-
-- Transparently adopt legacy unlabelled load balancers when Service finalizer and ingress IP prove ownership; preserve LB IDs, IPs and other labels
-- Handle deletion of legacy Services without leaving orphaned Hetzner load balancers
-- Preserve strict UID ownership checks when legacy identity cannot be verified
-
 ## [0.7.0](https://github.com/forkline/robotlb/tree/0.7.0) - 2026-10-13
 
 ### Added
