@@ -305,21 +305,13 @@ mod tests {
             .labels
             .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
 
-        assert!(LegacyOwnership::is_unused_replacement(
-            &replacement,
-            "service-uid",
-            "web.default"
-        ));
+        assert!(LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
         assert!(!LegacyOwnership::is_unused_replacement(
             &replacement,
             "different-uid",
             "web.default"
         ));
-        assert!(!LegacyOwnership::is_unused_replacement(
-            &replacement,
-            "service-uid",
-            "other-name"
-        ));
+        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "other-name"));
 
         replacement.labels.insert("team".into(), "platform".into());
         assert!(!LegacyOwnership::is_unused_replacement(
