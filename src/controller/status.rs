@@ -66,6 +66,21 @@ pub async fn patch_ingress_status(
         return Ok(());
     }
 
+    // A status-only watch event must not trigger an identical status write,
+    // otherwise two controllers can amplify a reconciliation loop.
+    let desired = Value::Array(ingress.clone());
+    let current = svc
+        .status
+        .as_ref()
+        .and_then(|status| status.load_balancer.as_ref())
+        .and_then(|balancer| balancer.ingress.as_ref());
+    if current.is_some_and(|entries| {
+        k8s_openapi::serde_json::to_value(entries)
+            .is_ok_and(|value| value == desired)
+    }) {
+        return Ok(());
+    }
+
     let svc_api = kube::Api::<Service>::namespaced(
         context.client.clone(),
         svc.namespace()
