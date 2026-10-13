@@ -21,14 +21,13 @@ use reconcile::{
 };
 use reconcile::{on_error, reconcile_service};
 use slice_changes::{SliceChanges, SliceTargetMode};
+
+use std::sync::Arc;
+
 #[cfg(test)]
 use kube::runtime::controller::Action;
 #[cfg(test)]
 use std::time::Duration;
-
-use std::{
-    sync::Arc,
-};
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
@@ -44,11 +43,10 @@ use kube::{
 use crate::{
     CurrentContext, consts,
     error::{RobotLBError, RobotLBResult},
-    metrics::ReconcileTimer,
 };
 
 pub(crate) use nodes::{
-    apply_desired_state, derive_services, derive_targets, discover_target_nodes, node_ip_type,
+    apply_desired_state, derive_services, derive_targets, discover_target_nodes,
 };
 pub(crate) use status::{build_ingress, patch_ingress_status};
 
