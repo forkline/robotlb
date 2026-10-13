@@ -343,10 +343,9 @@ mod policy_tests {
 
     #[test]
     fn typed_outcomes_preserve_requeue_and_cache_policy() {
-        let resync = Action::requeue(Duration::from_secs(300));
         for outcome in [
-            ReconcileOutcome::Synced(resync),
-            ReconcileOutcome::Unchanged(resync),
+            ReconcileOutcome::Synced(Action::requeue(Duration::from_secs(300))),
+            ReconcileOutcome::Unchanged(Action::requeue(Duration::from_secs(300))),
             ReconcileOutcome::Deleted(Action::await_change()),
         ] {
             assert!(outcome.was_successful());
