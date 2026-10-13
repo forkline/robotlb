@@ -261,7 +261,9 @@ mod tests {
         assert_eq!(parsed.name, "prod.svc-name.default");
         let annotated = service_with_annotations([(consts::LB_NAME_ANNOTATION, "custom")]);
         assert_eq!(
-            parse_load_balancer_config(&annotated, &config).unwrap().name,
+            parse_load_balancer_config(&annotated, &config)
+                .unwrap()
+                .name,
             "custom"
         );
     }
@@ -272,7 +274,10 @@ mod tests {
         let whole = format!("{part}.{part}.{part}");
         let generated = default_name(Some(&part), &part, &part);
         assert_eq!(generated.len(), 128);
-        assert_eq!(generated, format!("{}-{:016x}", &whole[..111], fnv1a64(&whole)));
+        assert_eq!(
+            generated,
+            format!("{}-{:016x}", &whole[..111], fnv1a64(&whole))
+        );
         assert_eq!(fnv1a64("foobar"), 0x8594_4171_f739_67e8);
         assert_ne!(
             default_name(Some(&part), &part, &"b".repeat(63)),
@@ -282,7 +287,16 @@ mod tests {
 
     #[test]
     fn invalid_cluster_names_are_rejected() {
-        for invalid in ["", "Prod", "prod.eu", "-prod", "prod-", "some_name", "prød", &"a".repeat(64)] {
+        for invalid in [
+            "",
+            "Prod",
+            "prod.eu",
+            "-prod",
+            "prod-",
+            "some_name",
+            "prød",
+            &"a".repeat(64),
+        ] {
             assert!(parse_cluster_name(invalid).is_err(), "{invalid:?}");
         }
         for valid in ["a", "prod", "eu-1", &"a".repeat(63)] {
