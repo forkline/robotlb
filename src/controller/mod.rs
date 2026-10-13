@@ -15,7 +15,7 @@ use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
     Resource, ResourceExt,
-    runtime::{Controller, controller::Action, reflector::ObjectRef, watcher},
+    runtime::{Controller, controller::Action, reflector::ObjectRef, watcher, events::{Event, EventType, Recorder, Reporter}},
 };
 
 use crate::{
@@ -129,12 +129,43 @@ pub async fn reconcile_service(
     }
 
     // Based on the service type, we will reconcile the load balancer.
-    match reconcile_load_balancer(lb, svc.clone(), context).await {
+    match reconcile_load_balancer(lb, svc.clone(), context.clone()).await {
         Ok(action) => Ok(action),
         Err(e) => {
             timer.set_failed();
+            if matches!(e, RobotLBError::InvalidLoadBalancerConfiguration(_)) {
+                publish_invalid_configuration_warning(&svc, &context, &e).await;
+            }
             Err(e)
         }
+    }
+}
+
+/// Emit a Warning Event while keeping reconciliation errors independent of Event RBAC.
+async fn publish_invalid_configuration_warning(
+    svc: &Service,
+    context: &CurrentContext,
+    error: &RobotLBError,
+) {
+    let recorder = Recorder::new(
+        context.client.clone(),
+        Reporter {
+            controller: "robotlb".to_string(),
+            instance: None,
+        },
+    );
+    let event = Event {
+        type_: EventType::Warning,
+        action: "Reconcile".to_string(),
+        reason: "InvalidLoadBalancerConfiguration".to_string(),
+        note: Some(error.to_string()),
+        secondary: None,
+    };
+    if let Err(publish_error) = recorder.publish(&event, &svc.object_ref()).await {
+        tracing::warn!(
+            error = %publish_error,
+            "Cannot publish invalid configuration Warning Event"
+        );
     }
 }
 
@@ -197,6 +228,7 @@ pub fn on_error(_: Arc<Service>, error: &RobotLBError, context: Arc<CurrentConte
 const fn action_for_error(error: &RobotLBError) -> Action {
     match error {
         RobotLBError::SkipService => Action::await_change(),
+        RobotLBError::InvalidLoadBalancerConfiguration(_) => Action::requeue(Duration::from_secs(180)),
         _ => Action::requeue(Duration::from_secs(30)),
     }
 }
@@ -287,6 +319,14 @@ mod tests {
     fn on_error_awaits_change_for_skipped_service() {
         let action = action_for_error(&RobotLBError::SkipService);
         assert_eq!(action, Action::await_change());
+    }
+
+    #[test]
+    fn invalid_configuration_requeues_less_frequently() {
+        assert_eq!(
+            action_for_error(&RobotLBError::InvalidLoadBalancerConfiguration("test".to_string())),
+            Action::requeue(Duration::from_secs(180))
+        );
     }
 
     #[test]
