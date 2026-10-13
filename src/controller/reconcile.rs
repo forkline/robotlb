@@ -9,7 +9,7 @@ use crate::{
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
     finalizers,
-    lb::{DesiredLoadBalancer, LoadBalancer},
+    lb::{DesiredLoadBalancer, LoadBalancer, LoadBalancerReconcile},
     memo,
     metrics::ReconcileTimer,
 };
@@ -35,6 +35,7 @@ pub(super) enum ReconcileOutcome {
 pub(super) enum PendingReason {
     RateLimited,
     Provisioning,
+    TypeChange,
 }
 
 impl ReconcileOutcome {
@@ -213,7 +214,18 @@ async fn reconcile_load_balancer(
         return Ok(ReconcileOutcome::Unchanged(Action::requeue(wait)));
     }
 
-    let hcloud_lb = lb.reconcile().await?;
+    let hcloud_lb = match lb.reconcile().await? {
+        LoadBalancerReconcile::Reconciled(lb) => lb,
+        LoadBalancerReconcile::TypeChangePending => {
+            // Never memoize an accepted but potentially incomplete resize.
+            // On the next pass, observe the updated Hetzner LB type before
+            // planning target additions against its actual capacity.
+            return Ok(ReconcileOutcome::Deferred(
+                PendingReason::TypeChange,
+                Action::requeue(INGRESS_RETRY_INTERVAL),
+            ));
+        }
+    };
 
     let ingress = build_ingress(
         &hcloud_lb,
@@ -355,7 +367,11 @@ mod policy_tests {
             assert!(outcome.was_successful());
             assert!(should_reset_failure_backoff(&Ok(outcome)));
         }
-        for reason in [PendingReason::RateLimited, PendingReason::Provisioning] {
+        for reason in [
+            PendingReason::RateLimited,
+            PendingReason::Provisioning,
+            PendingReason::TypeChange,
+        ] {
             let pending =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert!(!pending.was_successful());
