@@ -241,7 +241,7 @@ pub async fn get_load_balancer_type(
 ) -> RobotLBResult<hcloud::models::LoadBalancerType> {
     let response = hcloud::apis::load_balancer_types_api::list_load_balancer_types(
         hcloud_config,
-        Default::default(),
+        hcloud::apis::load_balancer_types_api::ListLoadBalancerTypesParams::default(),
     )
     .await?;
     response
