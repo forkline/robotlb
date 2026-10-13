@@ -65,7 +65,13 @@ pub fn parse_load_balancer_config(
         .annotations()
         .get(consts::LB_NAME_ANNOTATION)
         .cloned()
-        .unwrap_or_else(|| format!("{}.{}", svc.name_any(), svc.namespace().unwrap_or_else(|| "default".to_string())));
+        .unwrap_or_else(|| {
+            format!(
+                "{}.{}",
+                svc.name_any(),
+                svc.namespace().unwrap_or_else(|| "default".to_string())
+            )
+        });
 
     if name.is_empty() {
         return Err(RobotLBError::Generic(

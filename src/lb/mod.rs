@@ -89,8 +89,12 @@ impl LoadBalancer {
 
         Ok(Self {
             name: parsed.name,
-            legacy_name: (!svc.metadata.annotations.as_ref().is_some_and(|a| a.contains_key(crate::consts::LB_NAME_ANNOTATION)))
-                .then(|| svc.metadata.name.clone().unwrap_or_default()),
+            legacy_name: (!svc
+                .metadata
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.contains_key(crate::consts::LB_NAME_ANNOTATION)))
+            .then(|| svc.metadata.name.clone().unwrap_or_default()),
             service_uid: svc.metadata.uid.clone().unwrap_or_default(),
             private_ip: parsed.private_ip,
             public_interface: parsed.public_interface,
@@ -356,8 +360,8 @@ impl LoadBalancer {
         // Keep the target set stable even if there are more eligible nodes than the
         // Hetzner balancer type can accommodate. Unordered HashSet iteration would
         // otherwise cause targets to churn on each reconciliation.
-        let max_targets = usize::try_from(hcloud_balancer.load_balancer_type.max_targets)
-            .unwrap_or(usize::MAX);
+        let max_targets =
+            usize::try_from(hcloud_balancer.load_balancer_type.max_targets).unwrap_or(usize::MAX);
         let mut ordered: Vec<_> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         ordered.sort_unstable();
         ordered.dedup();
@@ -495,16 +499,27 @@ impl LoadBalancer {
 
     /// Delete only a balancer carrying this Service's ownership label.
     /// A mutable name can never authorize deletion.
+    ///
+    /// # Errors
+    /// Returns errors from Hetzner Cloud.
     pub async fn cleanup(&self) -> RobotLBResult<()> {
-        let Some(lb) = api::get_owned_load_balancer(
-            &self.hcloud_config, &self.service_uid,
-        ).await? else { return Ok(()); };
+        let Some(lb) = api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await?
+        else {
+            return Ok(());
+        };
         api::delete_load_balancer(&self.hcloud_config, lb.id).await
     }
 
     /// Release without parsing annotations: malformed config cannot block deletion.
+    ///
+    /// # Errors
+    /// Returns errors from Hetzner Cloud or a missing Service UID.
     pub async fn cleanup_service(svc: &Service, context: &CurrentContext) -> RobotLBResult<()> {
-        let uid = svc.metadata.uid.as_deref().ok_or(RobotLBError::SkipService)?;
+        let uid = svc
+            .metadata
+            .uid
+            .as_deref()
+            .ok_or(RobotLBError::SkipService)?;
         let Some(lb) = api::get_owned_load_balancer(&context.hcloud_config, uid).await? else {
             return Ok(());
         };
@@ -513,13 +528,17 @@ impl LoadBalancer {
 
     /// Retrieve an owned LB or safely adopt an unlabelled pre-upgrade balancer.
     async fn get_hcloud_lb(&self) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
-        if let Some(lb) = api::get_owned_load_balancer(
-            &self.hcloud_config, &self.service_uid,
-        ).await? { return Ok(Some(lb)); }
+        if let Some(lb) =
+            api::get_owned_load_balancer(&self.hcloud_config, &self.service_uid).await?
+        {
+            return Ok(Some(lb));
+        }
 
         let mut candidates = Vec::new();
-        if let Some(legacy) = &self.legacy_name {
-            if legacy != &self.name { candidates.push((legacy.as_str(), true)); }
+        if let Some(legacy) = &self.legacy_name
+            && legacy != &self.name
+        {
+            candidates.push((legacy.as_str(), true));
         }
         candidates.push((self.name.as_str(), false));
 
@@ -528,8 +547,12 @@ impl LoadBalancer {
                 continue;
             };
             if let Some(owner) = lb.labels.get(crate::consts::LB_OWNER_LABEL) {
-                if owner == &self.service_uid { return Ok(Some(lb)); }
-                if legacy { continue; }
+                if owner == &self.service_uid {
+                    return Ok(Some(lb));
+                }
+                if legacy {
+                    continue;
+                }
                 return Err(RobotLBError::HCloudError(format!(
                     "Balancer {name} belongs to a different Service UID: {owner}"
                 )));
@@ -537,13 +560,16 @@ impl LoadBalancer {
             // Names alone are not ownership evidence. Old robotlb targets were
             // exclusively IPs, and at least one must match an eligible node.
             let has_matching_target = lb.targets.iter().any(|target| {
-                target.ip.as_ref().is_some_and(|ip| self.targets.contains(&ip.ip))
+                target
+                    .ip
+                    .as_ref()
+                    .is_some_and(|ip| self.targets.contains(&ip.ip))
             });
             let ip_only = lb.targets.iter().all(|target| target.ip.is_some());
             if ip_only && has_matching_target {
-                return api::adopt_load_balancer(
-                    &self.hcloud_config, &lb, &self.service_uid,
-                ).await.map(Some);
+                return api::adopt_load_balancer(&self.hcloud_config, &lb, &self.service_uid)
+                    .await
+                    .map(Some);
             }
             if self.targets.is_empty() {
                 return Err(RobotLBError::HCloudError(format!(

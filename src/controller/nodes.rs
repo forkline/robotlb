@@ -113,7 +113,11 @@ fn node_ready(node: &Node) -> bool {
     node.status
         .as_ref()
         .and_then(|status| status.conditions.as_ref())
-        .and_then(|conditions| conditions.iter().find(|condition| condition.type_ == "Ready"))
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|condition| condition.type_ == "Ready")
+        })
         .is_some_and(|condition| condition.status == "True")
 }
 
@@ -173,10 +177,7 @@ async fn get_nodes_dynamically(
 ) -> RobotLBResult<Vec<Node>> {
     let pod_api = kube::Api::<Pod>::namespaced(
         context.client.clone(),
-        svc.namespace().as_deref().map_or_else(
-            || context.client.default_namespace(),
-            std::convert::identity,
-        ),
+        svc.namespace().as_deref().unwrap_or_else(|| context.client.default_namespace()),
     );
 
     let Some(pod_selector) = svc
@@ -211,14 +212,16 @@ async fn get_nodes_dynamically(
         .list(&ListParams::default())
         .await?
         .into_iter()
-        .filter(|node| target_nodes.contains(&node.name_any()) && !excluded_from_lb(node) && node_ready(node))
+        .filter(|node| {
+            target_nodes.contains(&node.name_any()) && !excluded_from_lb(node) && node_ready(node)
+        })
         .collect::<Vec<_>>();
 
     Ok(nodes)
 }
 
-/// Resolve selectorless Services through their ready EndpointSlice endpoints.
-/// Some controllers (e.g. KubeVirt) manage endpoints without a Service selector.
+/// Resolve selectorless Services through their ready `EndpointSlice` endpoints.
+/// Some controllers (e.g. `KubeVirt`) manage endpoints without a Service selector.
 async fn get_nodes_from_endpoint_slices(
     svc: &Arc<Service>,
     context: &Arc<CurrentContext>,
@@ -237,7 +240,11 @@ async fn get_nodes_from_endpoint_slices(
         .into_iter()
         .flat_map(|slice| slice.endpoints)
         .filter(|endpoint| {
-            endpoint.conditions.as_ref().and_then(|conditions| conditions.ready) != Some(false)
+            endpoint
+                .conditions
+                .as_ref()
+                .and_then(|conditions| conditions.ready)
+                != Some(false)
         })
         .filter_map(|endpoint| endpoint.node_name)
         .collect();
@@ -247,9 +254,7 @@ async fn get_nodes_from_endpoint_slices(
         .await?
         .into_iter()
         .filter(|node| {
-            target_names.contains(&node.name_any())
-                && !excluded_from_lb(node)
-                && node_ready(node)
+            target_names.contains(&node.name_any()) && !excluded_from_lb(node) && node_ready(node)
         })
         .collect())
 }
@@ -273,7 +278,9 @@ async fn get_nodes_by_selector(
         .list(&ListParams::default())
         .await?
         .into_iter()
-        .filter(|node| label_filter.check(node.labels()) && !excluded_from_lb(node) && node_ready(node))
+        .filter(|node| {
+            label_filter.check(node.labels()) && !excluded_from_lb(node) && node_ready(node)
+        })
         .collect::<Vec<_>>();
     Ok(nodes)
 }
@@ -312,7 +319,8 @@ mod tests {
         });
         assert!(eligible_node(&node));
         node.metadata.labels = Some(std::collections::BTreeMap::from([(
-            consts::EXCLUDE_FROM_LB_LABEL.to_string(), String::new()
+            consts::EXCLUDE_FROM_LB_LABEL.to_string(),
+            String::new(),
         )]));
         assert!(!eligible_node(&node));
     }

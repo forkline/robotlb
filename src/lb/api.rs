@@ -3,6 +3,9 @@
 //! This module provides a trait for interacting with the Hetzner Cloud API,
 //! allowing for easier testing through mock implementations.
 
+// Newer Clippy considers async_trait's generated must-use futures redundant.
+#![allow(clippy::double_must_use)]
+
 use async_trait::async_trait;
 use hcloud::{
     apis::{
@@ -22,7 +25,10 @@ use hcloud::{
     },
 };
 
-use crate::{consts, error::{RobotLBError, RobotLBResult}};
+use crate::{
+    consts,
+    error::{RobotLBError, RobotLBResult},
+};
 
 /// Trait for interacting with the Hetzner Cloud Load Balancer API.
 ///
@@ -200,19 +206,30 @@ pub async fn get_owned_load_balancer(
     hcloud_config: &HcloudConfig,
     uid: &str,
 ) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
-    if uid.is_empty() { return Err(RobotLBError::SkipService); }
+    if uid.is_empty() {
+        return Err(RobotLBError::SkipService);
+    }
     let response = hcloud::apis::load_balancers_api::list_load_balancers(
         hcloud_config,
         ListLoadBalancersParams {
             label_selector: Some(format!("{}={uid}", consts::LB_OWNER_LABEL)),
             ..Default::default()
         },
-    ).await?;
-    let mut owned: Vec<_> = response.load_balancers.into_iter()
-        .filter(|lb| lb.labels.get(consts::LB_OWNER_LABEL).is_some_and(|owner| owner == uid))
+    )
+    .await?;
+    let mut owned: Vec<_> = response
+        .load_balancers
+        .into_iter()
+        .filter(|lb| {
+            lb.labels
+                .get(consts::LB_OWNER_LABEL)
+                .is_some_and(|owner| owner == uid)
+        })
         .collect();
     if owned.len() > 1 {
-        return Err(RobotLBError::HCloudError(format!("Multiple balancers owned by UID {uid}")));
+        return Err(RobotLBError::HCloudError(format!(
+            "Multiple balancers owned by UID {uid}"
+        )));
     }
     Ok(owned.pop())
 }
@@ -234,7 +251,9 @@ pub async fn adopt_load_balancer(
                 name: None,
             },
         },
-    ).await.map_err(|err| RobotLBError::HCloudError(format!("Cannot label legacy LB: {err}")))?;
+    )
+    .await
+    .map_err(|err| RobotLBError::HCloudError(format!("Cannot label legacy LB: {err}")))?;
     Ok(*result.load_balancer)
 }
 
@@ -273,7 +292,10 @@ pub async fn create_load_balancer(
         hcloud::apis::load_balancers_api::CreateLoadBalancerParams {
             create_load_balancer_request: hcloud::models::CreateLoadBalancerRequest {
                 algorithm: Some(Box::new(algorithm)),
-                labels: Some(std::collections::HashMap::from([(consts::LB_OWNER_LABEL.to_string(), owner_uid.to_string())])),
+                labels: Some(std::collections::HashMap::from([(
+                    consts::LB_OWNER_LABEL.to_string(),
+                    owner_uid.to_string(),
+                )])),
                 load_balancer_type: balancer_type.to_string(),
                 location: Some(location.to_string()),
                 name: name.to_string(),
@@ -303,43 +325,6 @@ pub async fn delete_load_balancer(hcloud_config: &HcloudConfig, id: i64) -> Robo
     hcloud::apis::load_balancers_api::delete_load_balancer(
         hcloud_config,
         DeleteLoadBalancerParams { id },
-    )
-    .await?;
-    Ok(())
-}
-
-/// Delete a service from a load balancer.
-pub async fn delete_service(
-    hcloud_config: &HcloudConfig,
-    id: i64,
-    listen_port: i32,
-) -> RobotLBResult<()> {
-    hcloud::apis::load_balancers_api::delete_service(
-        hcloud_config,
-        DeleteServiceParams {
-            id,
-            delete_service_request: DeleteServiceRequest { listen_port },
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-/// Remove a target from a load balancer.
-pub async fn remove_target(
-    hcloud_config: &HcloudConfig,
-    id: i64,
-    target_ip: hcloud::models::LoadBalancerTargetIp,
-) -> RobotLBResult<()> {
-    hcloud::apis::load_balancers_api::remove_target(
-        hcloud_config,
-        RemoveTargetParams {
-            id,
-            remove_target_request: RemoveTargetRequest {
-                ip: Some(Box::new(target_ip)),
-                ..Default::default()
-            },
-        },
     )
     .await?;
     Ok(())
