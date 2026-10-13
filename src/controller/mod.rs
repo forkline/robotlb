@@ -21,14 +21,13 @@ use reconcile::{
 };
 use reconcile::{on_error, reconcile_service};
 use slice_changes::{SliceChanges, SliceTargetMode};
+
+use std::sync::Arc;
+
 #[cfg(test)]
 use kube::runtime::controller::Action;
 #[cfg(test)]
 use std::time::Duration;
-
-use std::{
-    sync::Arc,
-};
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
