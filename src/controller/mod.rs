@@ -4,13 +4,19 @@
 //! with the `robotlb` load balancer class.
 
 mod event_throttle;
+mod events;
+mod reconcile;
 mod node_changes;
 mod nodes;
 mod slice_changes;
 mod status;
 
-use event_throttle::EventKey;
 pub(crate) use event_throttle::EventThrottle;
+use reconcile::{reconcile_service, on_error};
+#[cfg(test)]
+use reconcile::{ReconcileOutcome, PendingReason, INGRESS_RETRY_INTERVAL, should_reset_failure_backoff, should_retry_missing_ingress, error_action};
+#[cfg(test)]
+use events::{warning_reason, event_note};
 use slice_changes::{SliceChanges, SliceTargetMode};
 
 use std::{
@@ -18,7 +24,6 @@ use std::{
     time::Duration,
 };
 
-use crate::memo;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
@@ -81,304 +86,6 @@ pub fn ensure_service_is_supported(svc: &Service) -> RobotLBResult<()> {
     }
 
     Ok(())
-}
-
-/// Whether reconciliation completed or intentionally deferred without applying state.
-/// Deferred attempts must not clear the Service's failure backoff or populate the memo.
-#[derive(Debug)]
-enum ReconcileOutcome {
-    Applied(Action),
-    Deferred(Action),
-}
-
-impl ReconcileOutcome {
-    const fn into_action(self) -> Action {
-        match self {
-            Self::Applied(action) | Self::Deferred(action) => action,
-        }
-    }
-}
-
-const INGRESS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
-const INGRESS_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(180);
-
-const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
-    matches!(
-        result,
-        Ok(ReconcileOutcome::Applied(_)) | Err(RobotLBError::SkipService)
-    )
-}
-
-/// Reconcile the service.
-///
-/// This function is called by the controller for each service.
-/// It will create or update the load balancer based on the service.
-/// If the service is being deleted, it will clean up the resources.
-///
-/// # Errors
-///
-/// Returns an error if the service is not supported, or if the Kubernetes/Hetzner API call fails.
-#[tracing::instrument(skip(svc, context), fields(service = svc.name_any()))]
-pub async fn reconcile_service(
-    svc: Arc<Service>,
-    context: Arc<CurrentContext>,
-) -> RobotLBResult<Action> {
-    let mut timer = ReconcileTimer::new(context.metrics.clone());
-    let result = reconcile_service_inner(svc.clone(), context.clone()).await;
-    context
-        .memo
-        .settle(&svc, matches!(result, Ok(ReconcileOutcome::Applied(_))));
-    if should_reset_failure_backoff(&result) {
-        context.error_backoff.forget(&service_key(&svc));
-    }
-    if let Err(error) = &result
-        && !matches!(error, RobotLBError::SkipService)
-    {
-        timer.set_failed();
-        publish_reconciliation_warning(&svc, &context, error).await;
-    }
-    result.map(ReconcileOutcome::into_action)
-}
-
-async fn reconcile_service_inner(
-    svc: Arc<Service>,
-    context: Arc<CurrentContext>,
-) -> RobotLBResult<ReconcileOutcome> {
-    if !context.is_leader.load(Ordering::Relaxed) {
-        return Err(RobotLBError::SkipService);
-    }
-    if let Some(delay) = context.rate_limit.remaining(std::time::Instant::now()) {
-        tracing::debug!(
-            ?delay,
-            "Hetzner API rate limit pause; skipping reconciliation"
-        );
-        return Ok(ReconcileOutcome::Deferred(Action::requeue(delay)));
-    }
-
-    // Release resources even if a Service changed its type/class, and even if
-    // configuration annotations have become invalid.
-    if svc.meta().deletion_timestamp.is_some()
-        || (finalizers::check(&svc) && ensure_service_is_supported(&svc).is_err())
-    {
-        LoadBalancer::cleanup_service(&svc, &context).await?;
-        finalizers::remove(context.client.clone(), &svc).await?;
-        return Ok(ReconcileOutcome::Applied(Action::await_change()));
-    }
-
-    ensure_service_is_supported(&svc)?;
-
-    tracing::info!("Starting service reconciliation");
-
-    let lb = LoadBalancer::try_from_svc(&svc, &context)?;
-
-    if !finalizers::check(&svc) {
-        finalizers::add(context.client.clone(), &svc).await?;
-    }
-
-    reconcile_load_balancer(lb, svc, context).await
-}
-
-fn service_key(svc: &Service) -> String {
-    svc.uid()
-        .unwrap_or_else(|| format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any()))
-}
-
-/// Display the last error on the Service without leaking Hetzner API credentials.
-/// Event publishing errors must not hide the original reconciliation failure.
-async fn publish_reconciliation_warning(
-    svc: &Service,
-    context: &CurrentContext,
-    error: &RobotLBError,
-) {
-    let reason = warning_reason(error);
-    let note = event_note(error, &context.config.hcloud_token);
-    let event_key = EventKey {
-        service_uid: svc.metadata.uid.clone().unwrap_or_else(|| {
-            format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())
-        }),
-        reason: reason.to_string(),
-        note: note.clone(),
-    };
-    let reserved_at = std::time::Instant::now();
-    if !context.event_throttle.reserve(&event_key, reserved_at) {
-        return;
-    }
-
-    let recorder = Recorder::new(
-        context.client.clone(),
-        Reporter {
-            controller: "robotlb".to_string(),
-            instance: None,
-        },
-    );
-    let event = Event {
-        type_: EventType::Warning,
-        action: "Reconcile".to_string(),
-        reason: reason.to_string(),
-        note: Some(note),
-        secondary: None,
-    };
-    if let Err(publish_error) = recorder.publish(&event, &svc.object_ref(&())).await {
-        context.event_throttle.release(&event_key, reserved_at);
-        tracing::warn!(
-            error = %publish_error,
-            "Cannot publish reconciliation Warning Event"
-        );
-    }
-}
-
-const fn warning_reason(error: &RobotLBError) -> &'static str {
-    match error {
-        RobotLBError::InvalidLoadBalancerConfiguration(_) => "InvalidLoadBalancerConfiguration",
-        RobotLBError::LoadBalancerProvisioningTimeout => "LoadBalancerProvisioningTimeout",
-        _ => "SyncLoadBalancerFailed",
-    }
-}
-
-/// Kubernetes Events cap notes at 1024 bytes, not characters.
-fn event_note(error: &RobotLBError, token: &str) -> String {
-    const MAX_NOTE_BYTES: usize = 1024;
-    let mut note = crate::error::redact(&error.to_string(), token);
-    if note.len() > MAX_NOTE_BYTES {
-        let mut end = MAX_NOTE_BYTES;
-        while !note.is_char_boundary(end) {
-            end -= 1;
-        }
-        note.truncate(end);
-    }
-    note
-}
-
-/// Reconcile the `LoadBalancer` type of service.
-///
-/// This function will find the nodes based on the node selector
-/// and create or update the load balancer.
-///
-/// # Errors
-///
-/// Returns an error if node discovery fails, or if the Kubernetes/Hetzner API call fails.
-async fn reconcile_load_balancer(
-    mut lb: LoadBalancer,
-    svc: Arc<Service>,
-    context: Arc<CurrentContext>,
-) -> RobotLBResult<ReconcileOutcome> {
-    let desired_ip_type = node_ip_type(&lb);
-
-    let nodes = discover_target_nodes(&svc, &context).await?;
-    let desired_targets = derive_targets(nodes, desired_ip_type);
-    let desired_services = derive_services(&svc);
-
-    // A Service without an allocated TCP nodePort cannot forward any traffic.
-    // Do not provision a billed but unusable Hetzner balancer.
-    if desired_services.is_empty() {
-        return Err(RobotLBError::Generic(
-            "Service has no TCP port with an allocated nodePort".to_string(),
-        ));
-    }
-
-    apply_desired_state(&mut lb, desired_targets, desired_services);
-
-    let uid = svc.uid();
-    let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
-    if let Some((wait, ingress)) = uid.as_deref().and_then(|uid| {
-        context
-            .memo
-            .unchanged(uid, fingerprint, std::time::Instant::now())
-    }) {
-        tracing::debug!("No effective configuration change; skipping Hetzner API");
-        // Status is not part of the fingerprint: repair it without Hetzner calls.
-        patch_ingress_status(&svc, &context, ingress).await?;
-        return Ok(ReconcileOutcome::Applied(Action::requeue(wait)));
-    }
-
-    let hcloud_lb = lb.reconcile().await?;
-
-    let ingress = build_ingress(
-        &hcloud_lb,
-        context.config.ipv6_ingress,
-        lb.proxy_mode,
-        lb.public_interface,
-    );
-    // Hetzner may acknowledge creation or network attachment before assigning an
-    // address. A successful API response is not a complete LoadBalancer reconcile
-    // until Kubernetes can advertise an ingress address. In particular, never
-    // memoize an empty result and postpone address discovery for five minutes.
-    if should_retry_missing_ingress(&ingress) {
-        if uid.as_deref().is_some_and(|uid| {
-            context.memo.missing_ingress_overdue(
-                uid,
-                fingerprint,
-                std::time::Instant::now(),
-                INGRESS_PROVISIONING_TIMEOUT,
-            )
-        }) {
-            return Err(RobotLBError::LoadBalancerProvisioningTimeout);
-        }
-        tracing::info!(
-            service = %svc.name_any(),
-            "Load balancer has no ingress address yet; retrying shortly"
-        );
-        return Ok(ReconcileOutcome::Deferred(Action::requeue(
-            INGRESS_RETRY_INTERVAL,
-        )));
-    }
-    patch_ingress_status(&svc, &context, ingress.clone()).await?;
-    if let Some(uid) = uid.as_deref() {
-        context.memo.clear_pending(uid);
-    }
-
-    let resync = Duration::from_secs(context.config.resync_interval);
-    if let Some(uid) = uid {
-        context.memo.record(
-            &uid,
-            fingerprint,
-            std::time::Instant::now(),
-            resync,
-            ingress,
-        );
-    }
-    Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
-}
-
-const fn should_retry_missing_ingress(
-    ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress],
-) -> bool {
-    ingress.is_empty()
-}
-
-/// Schedule failures independently, but pause the entire project on rate limits.
-#[allow(clippy::needless_pass_by_value)]
-pub fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
-    error_action(
-        error,
-        &context.rate_limit,
-        &context.error_backoff,
-        std::time::Instant::now(),
-        &service_key(&svc),
-    )
-}
-
-fn error_action(
-    error: &RobotLBError,
-    rate_limit: &crate::rate_limit::RateLimitGate,
-    backoff: &crate::backoff::ErrorBackoff,
-    now: std::time::Instant,
-    service: &str,
-) -> Action {
-    match error {
-        RobotLBError::SkipService => Action::await_change(),
-        // Provisioning keeps a fixed polling interval even after emitting an error.
-        RobotLBError::LoadBalancerProvisioningTimeout => Action::requeue(INGRESS_RETRY_INTERVAL),
-        error if error.is_rate_limited() => {
-            let delay = rate_limit.on_rate_limit(now);
-            tracing::warn!(
-                ?delay,
-                "Hetzner API rate limit reached; pausing all Services"
-            );
-            Action::requeue(delay)
-        }
-        _ => Action::requeue(backoff.on_failure(service, now)),
-    }
 }
 
 /// Map an `EndpointSlice` to the parent Service.
@@ -616,7 +323,7 @@ mod tests {
         let error = RobotLBError::HCloudError("temporary outage".to_string());
         let first = error_action(&error, &rate_limit, &backoff, now, svc);
         assert_eq!(first, Action::requeue(Duration::from_secs(5)));
-        let delayed = Ok(ReconcileOutcome::Deferred(Action::requeue(
+        let delayed = Ok(ReconcileOutcome::Deferred(PendingReason::RateLimited, Action::requeue(
             Duration::from_secs(60),
         )));
         assert!(!should_reset_failure_backoff(&delayed));
@@ -629,7 +336,7 @@ mod tests {
             Action::requeue(Duration::from_secs(10))
         );
         assert!(should_reset_failure_backoff(&Ok(
-            ReconcileOutcome::Applied(Action::await_change())
+            ReconcileOutcome::Deleted(Action::await_change())
         )));
         assert!(should_reset_failure_backoff(&Err(
             RobotLBError::SkipService
