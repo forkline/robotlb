@@ -84,6 +84,8 @@ pub enum RobotLBError {
     HCloudError(String),
     #[error("Invalid load balancer configuration: {0}")]
     InvalidLoadBalancerConfiguration(String),
+    #[error("Load balancer has no ingress address after the provisioning deadline")]
+    LoadBalancerProvisioningTimeout,
     #[error("Cannot list Hetzner load balancer types: {}", describe_hcloud(.0))]
     HCloudListLoadBalancerTypesError(
         #[from]
