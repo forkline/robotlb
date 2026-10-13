@@ -31,14 +31,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
-use kube::{
-    ResourceExt,
-    runtime::{
-        Controller, WatchStreamExt,
-        reflector::ObjectRef,
-        watcher,
-    },
-};
+use kube::{ResourceExt, runtime::{Controller, WatchStreamExt, reflector::ObjectRef, watcher}};
 
 use crate::{
     CurrentContext, consts,
