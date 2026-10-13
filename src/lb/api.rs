@@ -26,11 +26,11 @@ use hcloud::{
     },
 };
 
+use super::legacy::LegacyOwnership;
 use crate::{
     consts,
     error::{RobotLBError, RobotLBResult},
 };
-use super::legacy::LegacyOwnership;
 
 /// Trait for interacting with the Hetzner Cloud Load Balancer API.
 ///
@@ -346,7 +346,9 @@ pub(super) async fn find_or_adopt_legacy_load_balancer(
         // Never proceed with regular reconciliation or deletion until the UID
         // ownership lookup confirms that the same immutable LB ID is ours.
         let owned = get_owned_load_balancer(hcloud_config, uid).await?;
-        if let Some(owned) = owned && owned.id == fresh.id {
+        if let Some(owned) = owned
+            && owned.id == fresh.id
+        {
             tracing::info!(
                 lb_id = owned.id,
                 lb_name = %owned.name,
