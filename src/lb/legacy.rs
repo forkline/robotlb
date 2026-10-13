@@ -83,11 +83,7 @@ impl LegacyOwnership {
     /// A 0.7.x replacement is disposable only if it is exactly the newly
     /// provisioned, UID-owned shell with no traffic-bearing configuration.
     /// A legacy LB must be independently verified before calling this.
-    pub(super) fn is_unused_replacement(
-        lb: &LoadBalancer,
-        uid: &str,
-        desired_name: &str,
-    ) -> bool {
+    pub(super) fn is_unused_replacement(lb: &LoadBalancer, uid: &str, desired_name: &str) -> bool {
         lb.name == desired_name
             && lb.labels.len() == 1
             && lb
@@ -305,13 +301,21 @@ mod tests {
             .labels
             .insert(consts::LB_OWNER_LABEL.into(), "service-uid".into());
 
-        assert!(LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "web.default"));
+        assert!(LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "web.default"
+        ));
         assert!(!LegacyOwnership::is_unused_replacement(
             &replacement,
             "different-uid",
             "web.default"
         ));
-        assert!(!LegacyOwnership::is_unused_replacement(&replacement, "service-uid", "other-name"));
+        assert!(!LegacyOwnership::is_unused_replacement(
+            &replacement,
+            "service-uid",
+            "other-name"
+        ));
 
         replacement.labels.insert("team".into(), "platform".into());
         assert!(!LegacyOwnership::is_unused_replacement(
