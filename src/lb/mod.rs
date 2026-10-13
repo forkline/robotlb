@@ -1196,6 +1196,44 @@ mod tests {
     }
 
     #[test]
+    fn target_plan_never_exceeds_capacity_at_any_intermediate_step() {
+        for capacity in 1..=5 {
+            for current_count in 0..=capacity {
+                for desired_count in 0..=capacity {
+                    let current: Vec<_> = (0..current_count)
+                        .map(|i| format!("10.0.0.{}", 100 + i))
+                        .collect();
+                    let remote = remote_balancer_with_services(
+                        vec![],
+                        current.iter().map(String::as_str).collect(),
+                    );
+                    let mut lb = test_load_balancer();
+                    lb.targets = (0..desired_count)
+                        .map(|i| format!("10.0.0.{}", 1 + i))
+                        .collect();
+                    let plan = lb.plan_target_actions(&remote, capacity).unwrap();
+
+                    let mut occupied = current_count;
+                    for action in plan {
+                        match action {
+                            TargetReconcileAction::Remove { .. } => occupied -= 1,
+                            TargetReconcileAction::Add { .. } => {
+                                assert!(
+                                    occupied < capacity,
+                                    "addition would exceed capacity {capacity}"
+                                );
+                                occupied += 1;
+                            }
+                        }
+                        assert!(occupied <= capacity);
+                    }
+                    assert_eq!(occupied, desired_count);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn capacity_is_checked_before_any_target_requests() {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into()];
