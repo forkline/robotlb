@@ -17,6 +17,19 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --all-targets --locked
 
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked release image
+        run: docker build --progress=plain -t robotlb:pr .
+      - name: Verify runtime dependencies and CLI startup
+        run: |
+          docker run --rm --entrypoint /bin/sh robotlb:pr -c '
+            ldd /usr/local/bin/robotlb
+            /usr/local/bin/robotlb --help > /dev/null
+          '
+
   helm-unittest:
     runs-on: ubuntu-latest
     steps:
