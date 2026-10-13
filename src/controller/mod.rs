@@ -99,6 +99,9 @@ impl ReconcileOutcome {
     }
 }
 
+const INGRESS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const INGRESS_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(180);
+
 const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
     matches!(
         result,
@@ -225,10 +228,10 @@ async fn publish_reconciliation_warning(
 }
 
 const fn warning_reason(error: &RobotLBError) -> &'static str {
-    if matches!(error, RobotLBError::InvalidLoadBalancerConfiguration(_)) {
-        "InvalidLoadBalancerConfiguration"
-    } else {
-        "SyncLoadBalancerFailed"
+    match error {
+        RobotLBError::InvalidLoadBalancerConfiguration(_) => "InvalidLoadBalancerConfiguration",
+        RobotLBError::LoadBalancerProvisioningTimeout => "LoadBalancerProvisioningTimeout",
+        _ => "SyncLoadBalancerFailed",
     }
 }
 
@@ -277,12 +280,14 @@ async fn reconcile_load_balancer(
 
     let uid = svc.uid();
     let fingerprint = memo::fingerprint(&svc, &lb.targets, &lb.services);
-    if let Some(wait) = uid.as_deref().and_then(|uid| {
+    if let Some((wait, ingress)) = uid.as_deref().and_then(|uid| {
         context
             .memo
             .unchanged(uid, fingerprint, std::time::Instant::now())
     }) {
         tracing::debug!("No effective configuration change; skipping Hetzner API");
+        // Status is not part of the fingerprint: repair it without Hetzner calls.
+        patch_ingress_status(&svc, &context, ingress).await?;
         return Ok(ReconcileOutcome::Applied(Action::requeue(wait)));
     }
 
@@ -299,21 +304,34 @@ async fn reconcile_load_balancer(
     // until Kubernetes can advertise an ingress address. In particular, never
     // memoize an empty result and postpone address discovery for five minutes.
     if should_retry_missing_ingress(&ingress) {
+        if uid.as_deref().is_some_and(|uid| {
+            context.memo.missing_ingress_overdue(
+                uid,
+                fingerprint,
+                std::time::Instant::now(),
+                INGRESS_PROVISIONING_TIMEOUT,
+            )
+        }) {
+            return Err(RobotLBError::LoadBalancerProvisioningTimeout);
+        }
         tracing::info!(
             service = %svc.name_any(),
             "Load balancer has no ingress address yet; retrying shortly"
         );
         return Ok(ReconcileOutcome::Deferred(Action::requeue(
-            Duration::from_secs(15),
+            INGRESS_RETRY_INTERVAL,
         )));
     }
-    patch_ingress_status(&svc, &context, ingress).await?;
+    patch_ingress_status(&svc, &context, ingress.clone()).await?;
+    if let Some(uid) = uid.as_deref() {
+        context.memo.clear_pending(uid);
+    }
 
     let resync = Duration::from_secs(context.config.resync_interval);
     if let Some(uid) = uid {
         context
             .memo
-            .record(&uid, fingerprint, std::time::Instant::now(), resync);
+            .record(&uid, fingerprint, std::time::Instant::now(), resync, ingress);
     }
     Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
 }
@@ -345,6 +363,8 @@ fn error_action(
 ) -> Action {
     match error {
         RobotLBError::SkipService => Action::await_change(),
+        // Provisioning keeps a fixed polling interval even after emitting an error.
+        RobotLBError::LoadBalancerProvisioningTimeout => Action::requeue(INGRESS_RETRY_INTERVAL),
         error if error.is_rate_limited() => {
             let delay = rate_limit.on_rate_limit(now);
             tracing::warn!(
@@ -396,8 +416,9 @@ fn slice_target_mode(svc: &Service, dynamic_node_selector: bool) -> Option<Slice
     )
 }
 
-/// Wake all Services only when target-relevant Nodes change or an observed
-/// `EndpointSlice` is removed. Ordinary `EndpointSlice` changes use the targeted mapper.
+/// Wake all Services when target-relevant Nodes change or an observed
+/// `EndpointSlice` disappears or changes its Service label.
+/// Ordinary endpoint changes use the targeted mapper.
 fn node_change_signals(
     client: kube::Client,
     slice_changes: Arc<SliceChanges>,
@@ -610,6 +631,18 @@ mod tests {
             RobotLBError::SkipService
         )));
         assert!(!should_reset_failure_backoff(&Err(error)));
+    }
+
+    #[test]
+    fn provisioning_timeout_emits_a_warning_and_keeps_a_fixed_retry() {
+        let gate = crate::rate_limit::RateLimitGate::default();
+        let backoff = crate::backoff::ErrorBackoff::default();
+        let error = RobotLBError::LoadBalancerProvisioningTimeout;
+        assert_eq!(warning_reason(&error), "LoadBalancerProvisioningTimeout");
+        assert_eq!(
+            error_action(&error, &gate, &backoff, std::time::Instant::now(), "shop/web"),
+            Action::requeue(INGRESS_RETRY_INTERVAL)
+        );
     }
 
     #[test]
