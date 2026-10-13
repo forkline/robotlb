@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/forkline/robotlb/tree/0.7.0) - 2026-10-13
+
+### Added
+
+- Port upstream reconciliation efficiency, failure backoff, multicluster naming and image cleanup ([fc17cbb](https://github.com/forkline/robotlb/commit/fc17cbb))
+- Publish Warning Events for rejected LB configurations ([c8051c7](https://github.com/forkline/robotlb/commit/c8051c7))
+- Fall back to EndpointSlice-based node discovery for selectorless services ([e33cb1e](https://github.com/forkline/robotlb/commit/e33cb1e))
+
+### Fixed
+
+- Redact Hetzner errors and retry transient balancer deletion ([8531b8f](https://github.com/forkline/robotlb/commit/8531b8f))
+- Apply type change before unrelated LB mutations ([e7daa99](https://github.com/forkline/robotlb/commit/e7daa99))
+- Use statically typed Service ObjectReference for Events ([ed16ea0](https://github.com/forkline/robotlb/commit/ed16ea0))
+- Explicitly construct type list request ([da9f2f1](https://github.com/forkline/robotlb/commit/da9f2f1))
+- Grant Event permissions for configuration warnings ([28768bd](https://github.com/forkline/robotlb/commit/28768bd))
+- Retain rate limit errors from type lookups and report invalid config ([b181bc2](https://github.com/forkline/robotlb/commit/b181bc2))
+- Look up provider capacity with typed error propagation ([fb75517](https://github.com/forkline/robotlb/commit/fb75517))
+- Reject capacity mismatches before mutations and require UID ownership ([375f601](https://github.com/forkline/robotlb/commit/375f601))
+- Compare typed Kubernetes LoadBalancerIngress status ([e647f38](https://github.com/forkline/robotlb/commit/e647f38))
+- Handle zero max_targets in plan_target_actions ([61bc2f5](https://github.com/forkline/robotlb/commit/61bc2f5))
+- Retry temporary conflicts for services and networks ([90bb825](https://github.com/forkline/robotlb/commit/90bb825))
+- Retry temporary locked/conflicting target and LB operations ([76cc765](https://github.com/forkline/robotlb/commit/76cc765))
+- Match Hetzner detach error variant correctly ([bbcdbae](https://github.com/forkline/robotlb/commit/bbcdbae))
+- Format ported changes and address current Clippy lint failures ([cfa45dd](https://github.com/forkline/robotlb/commit/cfa45dd))
+- Label ownership and safely release Services ([91826aa](https://github.com/forkline/robotlb/commit/91826aa))
+- Honor externalTrafficPolicy and selectorless endpoints ([144eefc](https://github.com/forkline/robotlb/commit/144eefc))
+- Keep other controllers' finalizers ([9edcdc9](https://github.com/forkline/robotlb/commit/9edcdc9))
+- Route load balancer traffic according to externalTrafficPolicy ([7418478](https://github.com/forkline/robotlb/commit/7418478))
+
+### Documentation
+
+- Document UID-only ownership, safe capacity failures and monitoring ([8a6fe41](https://github.com/forkline/robotlb/commit/8a6fe41))
+- Document safe upstream migration and test ownership decisions ([9c56de0](https://github.com/forkline/robotlb/commit/9c56de0))
+
+### Performance
+
+- Avoid unchanged LoadBalancer status patches ([a0f0d31](https://github.com/forkline/robotlb/commit/a0f0d31))
+
+### Build
+
+- Refresh Cargo.lock transitives every Monday ([24f0431](https://github.com/forkline/robotlb/commit/24f0431))
+- Bump bytes from 1.8.0 to 1.12.1 ([7268ba2](https://github.com/forkline/robotlb/commit/7268ba2))
+- Bump tracing-subscriber from 0.3.18 to 0.3.20 ([133882d](https://github.com/forkline/robotlb/commit/133882d))
+- Bump rand from 0.8.5 to 0.8.8 ([3e846bf](https://github.com/forkline/robotlb/commit/3e846bf))
+- Bump openssl from 0.10.72 to 0.10.81 ([c22ac9b](https://github.com/forkline/robotlb/commit/c22ac9b))
+- Bump serde_with from 3.11.0 to 3.24.0 ([f414064](https://github.com/forkline/robotlb/commit/f414064))
+- Bump ring from 0.17.8 to 0.17.14 ([3367b72](https://github.com/forkline/robotlb/commit/3367b72))
+- Bump tokio from 1.41.1 to 1.43.1 ([ab713b4](https://github.com/forkline/robotlb/commit/ab713b4))
+- Bump openssl from 0.10.70 to 0.10.72 ([6b7b182](https://github.com/forkline/robotlb/commit/6b7b182))
+
 ## [0.6.0](https://github.com/forkline/robotlb/tree/0.6.0) - 2026-03-29
 
 ### Added
