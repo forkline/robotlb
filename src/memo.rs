@@ -229,7 +229,7 @@ mod tests {
         assert!(!settled(&svc, true));
         let mut svc = service();
         svc.metadata.deletion_timestamp = Some(
-            k8s_openapi::serde_json::from_str("\\"2026-01-01T00:00:00Z\\"").unwrap(),
+            k8s_openapi::serde_json::from_str(r#""2026-01-01T00:00:00Z""#).unwrap(),
         );
         assert!(!settled(&svc, true));
     }
