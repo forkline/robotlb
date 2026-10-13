@@ -42,6 +42,7 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 pub enum LoadBalancerReconcile {
     Reconciled(Box<hcloud::models::LoadBalancer>),
     TypeChangePending,
+    TargetsPending(Box<hcloud::models::LoadBalancer>),
 }
 
 /// Struct representing a load balancer.
@@ -140,7 +141,9 @@ impl LoadBalancer {
         self.reconcile_algorithm(&hcloud_balancer, &api).await?;
         self.reconcile_network(&hcloud_balancer).await?;
         self.reconcile_services(&hcloud_balancer, &api).await?;
-        self.reconcile_targets(&hcloud_balancer, &api).await?;
+        if self.reconcile_targets(&hcloud_balancer, &api).await? {
+            return Ok(LoadBalancerReconcile::TargetsPending(Box::new(hcloud_balancer)));
+        }
         Ok(LoadBalancerReconcile::Reconciled(Box::new(hcloud_balancer)))
     }
 
@@ -237,9 +240,9 @@ impl LoadBalancer {
         &self,
         hcloud_balancer: &hcloud::models::LoadBalancer,
         api: &impl HcloudLoadBalancerApi,
-    ) -> RobotLBResult<()> {
-        // Capacity may be omitted from a Load Balancer response even though it
-        // is available from the type catalog. Only pay for a lookup when needed.
+    ) -> RobotLBResult<bool> {
+        // Prefer capacity in the provider's current snapshot; only fall back
+        // to the type catalog if that metadata is missing.
         let capacity = if hcloud_balancer.load_balancer_type.max_targets > 0 {
             usize::try_from(hcloud_balancer.load_balancer_type.max_targets).map_err(|_| {
                 RobotLBError::InvalidLoadBalancerConfiguration(
@@ -255,27 +258,36 @@ impl LoadBalancer {
                 )
             })?
         };
-        for action in self.plan_target_actions(hcloud_balancer, capacity)? {
-            match action {
-                TargetReconcileAction::Remove { target_ip } => {
-                    tracing::info!("Removing target {}", target_ip);
+
+        let Some(action) = self.next_target_action(hcloud_balancer, capacity)? else {
+            return Ok(false);
+        };
+        // One mutation per pass: a new reconcile re-observes both Kubernetes
+        // node placement and actual Hetzner capacity / target state.
+        match action {
+            TargetReconcileAction::Remove { target_ip } => {
+                tracing::info!("Removing target {}", target_ip);
+                let action =
                     retry_temporary(|| api.remove_target(hcloud_balancer.id, target_ip.clone()))
                         .await?;
-                }
-                TargetReconcileAction::Add { target_ip } => {
-                    tracing::info!("Adding target {}", target_ip);
-                    match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone()))
-                        .await
-                    {
-                        Err(error) if error.target_already_defined() => {
-                            tracing::debug!("Target was already added in an earlier attempt");
-                        }
-                        result => result?,
+                wait_for_action(api, action).await?;
+            }
+            TargetReconcileAction::Add { target_ip } => {
+                tracing::info!("Adding target {}", target_ip);
+                match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone()))
+                    .await
+                {
+                    Ok(action) => wait_for_action(api, action).await?,
+                    Err(error) if error.target_already_defined() => {
+                        // A previous accepted mutation may have completed
+                        // since our last snapshot; just re-observe it.
+                        tracing::debug!("Target already exists; re-observing provider state");
                     }
+                    Err(error) => return Err(error),
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Reconcile the load balancer algorithm.
@@ -310,7 +322,10 @@ impl LoadBalancer {
                 hcloud_balancer.load_balancer_type.name,
                 balancer_type
             );
-            retry_temporary(|| api.change_type(hcloud_balancer.id, balancer_type.clone())).await?;
+            let action =
+                retry_temporary(|| api.change_type(hcloud_balancer.id, balancer_type.clone()))
+                    .await?;
+            wait_for_action(api, action).await?;
         }
         Ok(())
     }
@@ -369,13 +384,13 @@ impl LoadBalancer {
         actions
     }
 
-    fn plan_target_actions(
+    /// Choose one capacity-safe target change from fresh Hetzner state.
+    /// Externally managed (non-IP) targets consume capacity but are untouched.
+    fn next_target_action(
         &self,
         hcloud_balancer: &hcloud::models::LoadBalancer,
         capacity: usize,
-    ) -> RobotLBResult<Vec<TargetReconcileAction>> {
-        // Plan against the observed provider occupancy, including non-IP
-        // targets that robotlb cannot safely modify.
+    ) -> RobotLBResult<Option<TargetReconcileAction>> {
         let desired: HashSet<String> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
         let existing: HashSet<String> = hcloud_balancer
             .targets
@@ -383,42 +398,34 @@ impl LoadBalancer {
             .filter_map(|target| target.ip.as_ref().map(|ip| normalize_ip(&ip.ip)))
             .collect();
 
-        let mut to_add: Vec<_> = desired.difference(&existing).cloned().collect();
-        to_add.sort();
-
-        let mut to_remove: Vec<String> = hcloud_balancer
+        let mut missing: Vec<_> = desired.difference(&existing).cloned().collect();
+        missing.sort();
+        let mut obsolete: Vec<_> = hcloud_balancer
             .targets
             .iter()
             .filter_map(|target| target.ip.as_ref())
-            .filter(|target| !desired.contains(&normalize_ip(&target.ip)))
-            .map(|target| target.ip.clone())
+            .filter(|ip| !desired.contains(&normalize_ip(&ip.ip)))
+            .map(|ip| ip.ip.clone())
             .collect();
-        to_remove.sort();
-        to_remove.dedup();
+        obsolete.sort();
+        obsolete.dedup();
 
-        let mut occupied = hcloud_balancer.targets.len();
-        let mut removals = to_remove.into_iter();
-        let mut actions = Vec::with_capacity(to_add.len() + removals.len());
-
-        // Add first if a slot is free. At capacity, release one obsolete IP
-        // before its replacement. If additional slots cannot be freed without
-        // deleting an unmanaged/non-IP target, fail before any API mutation.
-        for ip in to_add {
-            while occupied >= capacity {
-                let Some(stale) = removals.next() else {
-                    return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
-                        "Cannot add load balancer target {ip}: {occupied} of {capacity} target slots occupied; no removable outdated IP targets remain",
-                    )));
-                };
-                actions.push(TargetReconcileAction::Remove { target_ip: stale });
-                occupied -= 1;
+        if let Some(ip) = missing.into_iter().next() {
+            if hcloud_balancer.targets.len() < capacity {
+                return Ok(Some(TargetReconcileAction::Add { target_ip: ip }));
             }
-            actions.push(TargetReconcileAction::Add { target_ip: ip });
-            occupied += 1;
+            if let Some(stale) = obsolete.into_iter().next() {
+                return Ok(Some(TargetReconcileAction::Remove { target_ip: stale }));
+            }
+            return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                "Cannot add load balancer target {ip}: {} of {capacity} target slots occupied; no removable obsolete IP target remains",
+                hcloud_balancer.targets.len()
+            )));
         }
-
-        actions.extend(removals.map(|target_ip| TargetReconcileAction::Remove { target_ip }));
-        Ok(actions)
+        Ok(obsolete
+            .into_iter()
+            .next()
+            .map(|target_ip| TargetReconcileAction::Remove { target_ip }))
     }
 
     fn plan_algorithm_action(
@@ -685,6 +692,53 @@ impl LoadBalancer {
     }
 }
 
+/// A successful Hetzner HTTP response only means an asynchronous Action was accepted.
+const ACTION_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const ACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn wait_for_action(
+    api: &impl HcloudLoadBalancerApi,
+    action: hcloud::models::Action,
+) -> RobotLBResult<()> {
+    wait_for_action_with_limits(api, action, ACTION_POLL_INTERVAL, ACTION_WAIT_TIMEOUT).await
+}
+
+/// Bound the entire Action lifecycle, including stalled HTTP polling requests
+/// and any retries inside retry_temporary.
+async fn wait_for_action_with_limits(
+    api: &impl HcloudLoadBalancerApi,
+    mut action: hcloud::models::Action,
+    poll_interval: Duration,
+    timeout: Duration,
+) -> RobotLBResult<()> {
+    let action_id = action.id;
+    let command = action.command.clone();
+    tokio::time::timeout(timeout, async {
+        loop {
+            match action.status {
+                hcloud::models::action::Status::Success => return Ok(()),
+                hcloud::models::action::Status::Error => {
+                    let detail = action.error.as_ref().map_or_else(
+                        || "unknown reason".to_string(),
+                        |error| format!("{}: {}", error.code, error.message),
+                    );
+                    return Err(RobotLBError::HCloudError(format!(
+                        "Hetzner action {} ({}) failed: {detail}",
+                        action.id, action.command
+                    )));
+                }
+                hcloud::models::action::Status::Running => {}
+            }
+            tokio::time::sleep(poll_interval).await;
+            action = retry_temporary(|| api.get_action(action.id)).await?;
+        }
+    })
+    .await
+    .map_err(|_| RobotLBError::HCloudError(format!(
+        "Timed out waiting for Hetzner action {action_id} ({command})"
+    )))?
+}
+
 /// Retry temporary Hetzner conflicts without treating permanent errors or 429s as transient.
 async fn retry_temporary<T, F, Fut>(mut operation: F) -> RobotLBResult<T>
 where
@@ -819,6 +873,7 @@ mod tests {
     struct MockHcloudApi {
         calls: Mutex<Vec<ApiCall>>,
         fail_next_add_target: std::sync::atomic::AtomicBool,
+        hang_get_action: std::sync::atomic::AtomicBool,
     }
 
     impl MockHcloudApi {
@@ -880,15 +935,23 @@ mod tests {
             &self,
             _load_balancer_id: i64,
             target_ip: String,
-        ) -> RobotLBResult<()> {
+        ) -> RobotLBResult<hcloud::models::Action> {
             self.calls
                 .lock()
                 .expect("lock should not be poisoned")
                 .push(ApiCall::RemoveTarget { ip: target_ip });
-            Ok(())
+            Ok(hcloud::models::Action {
+                status: hcloud::models::action::Status::Success,
+                id: 123,
+                ..Default::default()
+            })
         }
 
-        async fn add_target(&self, _load_balancer_id: i64, target_ip: String) -> RobotLBResult<()> {
+        async fn add_target(
+            &self,
+            _load_balancer_id: i64,
+            target_ip: String,
+        ) -> RobotLBResult<hcloud::models::Action> {
             self.calls
                 .lock()
                 .expect("lock should not be poisoned")
@@ -899,7 +962,11 @@ mod tests {
             {
                 return Err(RobotLBError::HCloudError("injected target failure".into()));
             }
-            Ok(())
+            Ok(hcloud::models::Action {
+                status: hcloud::models::action::Status::Success,
+                id: 123,
+                ..Default::default()
+            })
         }
 
         async fn change_algorithm(
@@ -918,12 +985,27 @@ mod tests {
             &self,
             _load_balancer_id: i64,
             balancer_type: String,
-        ) -> RobotLBResult<()> {
+        ) -> RobotLBResult<hcloud::models::Action> {
             self.calls
                 .lock()
                 .expect("lock should not be poisoned")
                 .push(ApiCall::ChangeType { balancer_type });
-            Ok(())
+            Ok(hcloud::models::Action {
+                status: hcloud::models::action::Status::Success,
+                id: 123,
+                ..Default::default()
+            })
+        }
+        async fn get_action(&self, _action_id: i64) -> RobotLBResult<hcloud::models::Action> {
+            if self.hang_get_action.load(std::sync::atomic::Ordering::Relaxed) {
+                std::future::pending::<RobotLBResult<hcloud::models::Action>>().await
+            } else {
+                Ok(hcloud::models::Action {
+                    status: hcloud::models::action::Status::Success,
+                    id: 123,
+                    ..Default::default()
+                })
+            }
         }
     }
 
@@ -1030,67 +1112,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_targets_uses_mock_api_for_target_diff() {
+    async fn target_changes_are_sequential_and_reobserved() {
         let mut lb = test_load_balancer();
-        lb.targets = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
-
-        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.2", "10.0.0.3"]);
+        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
         let api = MockHcloudApi::default();
-
-        lb.reconcile_targets(&remote, &api)
-            .await
-            .expect("target reconcile should succeed");
-
-        assert_eq!(
-            api.calls(),
-            vec![
-                ApiCall::AddTarget {
-                    ip: "10.0.0.1".to_string(),
-                },
-                ApiCall::RemoveTarget {
-                    ip: "10.0.0.3".to_string(),
-                },
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_partial_target_update_retries_from_fresh_observed_state() {
-        let mut lb = test_load_balancer();
-        lb.targets = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
         let before = remote_balancer_with_services(vec![], vec!["10.0.0.2", "10.0.0.3"]);
-        let api = MockHcloudApi {
-            fail_next_add_target: std::sync::atomic::AtomicBool::new(true),
-            ..Default::default()
-        };
 
-        // Spare capacity allows add-first; an add failure must preserve
-        // the existing healthy target rather than deleting it prematurely.
-        assert!(lb.reconcile_targets(&before, &api).await.is_err());
+        assert!(lb.reconcile_targets(&before, &api).await.unwrap());
         assert_eq!(
             api.calls(),
             vec![ApiCall::AddTarget {
                 ip: "10.0.0.1".into()
-            }],
+            }]
         );
 
-        // A retry from the provider's unchanged state adds the missing
-        // backend before removing the obsolete one.
-        lb.reconcile_targets(&before, &api).await.unwrap();
+        let after_add =
+            remote_balancer_with_services(vec![], vec!["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+        assert!(lb.reconcile_targets(&after_add, &api).await.unwrap());
         assert_eq!(
             api.calls(),
             vec![
-                ApiCall::AddTarget {
-                    ip: "10.0.0.1".into()
-                },
                 ApiCall::AddTarget {
                     ip: "10.0.0.1".into()
                 },
                 ApiCall::RemoveTarget {
                     ip: "10.0.0.3".into()
                 },
-            ],
+            ]
         );
+        let converged = remote_balancer_with_services(vec![], vec!["10.0.0.1", "10.0.0.2"]);
+        assert!(!lb.reconcile_targets(&converged, &api).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_add_preserves_old_target_and_retries_from_fresh_state() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into()];
+        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3"]);
+        let api = MockHcloudApi {
+            fail_next_add_target: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+        assert!(lb.reconcile_targets(&remote, &api).await.is_err());
+        assert_eq!(
+            api.calls(),
+            vec![ApiCall::AddTarget {
+                ip: "10.0.0.1".into()
+            }]
+        );
+        assert!(lb.reconcile_targets(&remote, &api).await.unwrap());
+        assert_eq!(api.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn running_action_is_polled_until_finished() {
+        let api = MockHcloudApi::default();
+        let action = hcloud::models::Action {
+            id: 123,
+            command: "add_target".into(),
+            status: hcloud::models::action::Status::Running,
+            ..Default::default()
+        };
+        wait_for_action(&api, action).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hung_action_status_request_respects_overall_timeout() {
+        let api = MockHcloudApi {
+            hang_get_action: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+        let action = hcloud::models::Action {
+            id: 123,
+            command: "add_target".into(),
+            status: hcloud::models::action::Status::Running,
+            ..Default::default()
+        };
+        // Give the poll enough time to enter the deliberately hanging API
+        // call. The deadline must still cancel that in-flight request.
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_action_with_limits(
+                &api,
+                action,
+                Duration::from_millis(1),
+                Duration::from_millis(40),
+            ),
+        )
+        .await
+        .expect("internal Action timeout must beat the outer test deadline");
+        let error = result.expect_err("the stalled Action must time out");
+        assert!(error.to_string().contains("Timed out waiting"));
+    }
+
+    #[tokio::test]
+    async fn failed_action_returns_an_error() {
+        let api = MockHcloudApi::default();
+        let action = hcloud::models::Action {
+            id: 123,
+            command: "remove_target".into(),
+            status: hcloud::models::action::Status::Error,
+            error: Some(Box::new(hcloud::models::Error {
+                code: "action_failed".into(),
+                message: "failed to remove target".into(),
+            })),
+            ..Default::default()
+        };
+        let error = wait_for_action(&api, action).await.unwrap_err();
+        assert!(error.to_string().contains("action_failed"));
     }
 
     #[tokio::test]
@@ -1149,96 +1278,43 @@ mod tests {
     }
 
     #[test]
-    fn plan_target_actions_builds_expected_diff() {
-        let mut lb = test_load_balancer();
-        lb.targets = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
-
-        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.2", "10.0.0.3"]);
-
-        let plan = lb.plan_target_actions(&remote, 25).unwrap();
-
-        assert_eq!(
-            plan,
-            vec![
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.1".to_string(),
-                },
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.3".to_string(),
-                },
-            ]
-        );
-    }
-    #[test]
-    fn at_capacity_targets_are_replaced_one_at_a_time() {
+    fn next_action_adds_first_with_spare_capacity() {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
-        let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
-        remote.load_balancer_type.max_targets = 2;
-
+        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
         assert_eq!(
-            lb.plan_target_actions(&remote, 2).unwrap(),
-            vec![
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.3".into()
-                },
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.1".into()
-                },
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.4".into()
-                },
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.2".into()
-                },
-            ],
+            lb.next_target_action(&remote, 25).unwrap(),
+            Some(TargetReconcileAction::Add {
+                target_ip: "10.0.0.1".into()
+            }),
         );
     }
 
     #[test]
-    fn target_plan_never_exceeds_capacity_at_any_intermediate_step() {
-        for capacity in 1..=5 {
-            for current_count in 0..=capacity {
-                for desired_count in 0..=capacity {
-                    let current: Vec<_> = (0..current_count)
-                        .map(|i| format!("10.0.0.{}", 100 + i))
-                        .collect();
-                    let remote = remote_balancer_with_services(
-                        vec![],
-                        current.iter().map(String::as_str).collect(),
-                    );
-                    let mut lb = test_load_balancer();
-                    lb.targets = (0..desired_count)
-                        .map(|i| format!("10.0.0.{}", 1 + i))
-                        .collect();
-                    let plan = lb.plan_target_actions(&remote, capacity).unwrap();
-
-                    let mut occupied = current_count;
-                    for action in plan {
-                        match action {
-                            TargetReconcileAction::Remove { .. } => occupied -= 1,
-                            TargetReconcileAction::Add { .. } => {
-                                assert!(
-                                    occupied < capacity,
-                                    "addition would exceed capacity {capacity}"
-                                );
-                                occupied += 1;
-                            }
-                        }
-                        assert!(occupied <= capacity);
-                    }
-                    assert_eq!(occupied, desired_count);
-                }
-            }
-        }
+    fn next_action_removes_one_before_adding_at_capacity() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
+        assert_eq!(
+            lb.next_target_action(&remote, 2).unwrap(),
+            Some(TargetReconcileAction::Remove {
+                target_ip: "10.0.0.3".into()
+            }),
+        );
     }
 
     #[test]
-    fn capacity_is_checked_before_any_target_requests() {
+    fn no_mutation_when_converged() {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into()];
-        // An unmanaged, non-IP target consumes the only slot and cannot be
-        // silently removed to make room for our desired target.
+        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.1"]);
+        assert!(lb.next_target_action(&remote, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn cannot_displace_unmanaged_targets_when_full() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into()];
         let remote = hcloud::models::LoadBalancer {
             targets: vec![hcloud::models::LoadBalancerTarget {
                 server: Some(Box::new(hcloud::models::ResourceId { id: 41 })),
@@ -1246,63 +1322,71 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = lb.plan_target_actions(&remote, 1).unwrap_err();
         assert!(matches!(
-            err,
-            RobotLBError::InvalidLoadBalancerConfiguration(_)
+            lb.next_target_action(&remote, 1),
+            Err(RobotLBError::InvalidLoadBalancerConfiguration(_))
         ));
     }
 
     #[test]
-    fn capacity_plan_accounts_for_existing_unmanaged_targets() {
+    fn unmanaged_targets_count_toward_capacity() {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
         let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
         remote
             .targets
             .push(hcloud::models::LoadBalancerTarget::default());
-
         assert_eq!(
-            lb.plan_target_actions(&remote, 3).unwrap(),
-            vec![
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.3".into()
-                },
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.1".into()
-                },
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.4".into()
-                },
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.2".into()
-                },
-            ],
+            lb.next_target_action(&remote, 3).unwrap(),
+            Some(TargetReconcileAction::Remove {
+                target_ip: "10.0.0.3".into()
+            })
         );
     }
 
     #[test]
-    fn spare_capacity_preserves_old_backends_until_additions() {
-        let mut lb = test_load_balancer();
-        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
-        let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
-        let actions = lb.plan_target_actions(&remote, 25).unwrap();
-        assert_eq!(
-            actions,
-            vec![
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.1".into()
-                },
-                TargetReconcileAction::Add {
-                    target_ip: "10.0.0.2".into()
-                },
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.3".into()
-                },
-                TargetReconcileAction::Remove {
-                    target_ip: "10.0.0.4".into()
-                },
-            ],
-        );
+    fn repeated_single_step_actions_never_exceed_capacity() {
+        for capacity in 1..=5 {
+            for current_count in 0..=capacity {
+                for desired_count in 0..=capacity {
+                    let mut remote = remote_balancer_with_services(
+                        vec![],
+                        (0..current_count)
+                            .map(|i| format!("10.0.0.{}", 100 + i))
+                            .collect::<Vec<_>>()
+                            .iter()
+                            .map(String::as_str)
+                            .collect(),
+                    );
+                    let mut lb = test_load_balancer();
+                    lb.targets = (0..desired_count)
+                        .map(|i| format!("10.0.0.{}", 1 + i))
+                        .collect();
+                    let mut operations = 0;
+                    while let Some(action) = lb.next_target_action(&remote, capacity).unwrap() {
+                        operations += 1;
+                        assert!(operations <= current_count + desired_count);
+                        match action {
+                            TargetReconcileAction::Remove { target_ip } => {
+                                remote.targets.retain(|target| {
+                                    target.ip.as_ref().is_none_or(|ip| ip.ip != target_ip)
+                                });
+                            }
+                            TargetReconcileAction::Add { target_ip } => {
+                                assert!(remote.targets.len() < capacity);
+                                remote.targets.push(hcloud::models::LoadBalancerTarget {
+                                    ip: Some(Box::new(hcloud::models::LoadBalancerTargetIp {
+                                        ip: target_ip,
+                                    })),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                        assert!(remote.targets.len() <= capacity);
+                    }
+                    assert_eq!(remote.targets.len(), desired_count);
+                }
+            }
+        }
     }
 }

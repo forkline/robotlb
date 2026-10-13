@@ -36,6 +36,7 @@ pub(super) enum PendingReason {
     RateLimited,
     Provisioning,
     TypeChange,
+    TargetChange,
 }
 
 impl ReconcileOutcome {
@@ -214,17 +215,17 @@ async fn reconcile_load_balancer(
         return Ok(ReconcileOutcome::Unchanged(Action::requeue(wait)));
     }
 
-    let hcloud_lb = match lb.reconcile().await? {
-        LoadBalancerReconcile::Reconciled(lb) => lb,
+    let (hcloud_lb, targets_pending) = match lb.reconcile().await? {
+        LoadBalancerReconcile::Reconciled(lb) => (lb, false),
         LoadBalancerReconcile::TypeChangePending => {
-            // Never memoize an accepted but potentially incomplete resize.
-            // On the next pass, observe the updated Hetzner LB type before
-            // planning target additions against its actual capacity.
+            // The resize Action finished; read the new provider capacity on
+            // the next pass before touching any targets.
             return Ok(ReconcileOutcome::Deferred(
                 PendingReason::TypeChange,
-                Action::requeue(INGRESS_RETRY_INTERVAL),
+                Action::requeue(Duration::from_secs(1)),
             ));
         }
+        LoadBalancerReconcile::TargetsPending(lb) => (lb, true),
     };
 
     let ingress = build_ingress(
@@ -233,6 +234,22 @@ async fn reconcile_load_balancer(
         lb.proxy_mode,
         lb.public_interface,
     );
+    // Ingress publication must not wait for all target changes. ExternalDNS
+    // can use the LB address while Hetzner completes target reconciliation.
+    // Never memoize the unfinished target set.
+    if !ingress.is_empty() {
+        patch_ingress_status(&svc, &context, ingress.clone()).await?;
+        if let Some(uid) = uid.as_deref() {
+            context.memo.clear_pending(uid);
+        }
+    }
+    if targets_pending {
+        return Ok(ReconcileOutcome::Deferred(
+            PendingReason::TargetChange,
+            Action::requeue(Duration::from_secs(1)),
+        ));
+    }
+
     // Hetzner may acknowledge creation or network attachment before assigning an
     // address. A successful API response is not a complete LoadBalancer reconcile
     // until Kubernetes can advertise an ingress address. In particular, never
@@ -257,11 +274,6 @@ async fn reconcile_load_balancer(
             Action::requeue(INGRESS_RETRY_INTERVAL),
         ));
     }
-    patch_ingress_status(&svc, &context, ingress.clone()).await?;
-    if let Some(uid) = uid.as_deref() {
-        context.memo.clear_pending(uid);
-    }
-
     let resync = Duration::from_secs(context.config.resync_interval);
     if let Some(uid) = uid {
         context.memo.record(
@@ -371,6 +383,7 @@ mod policy_tests {
             PendingReason::RateLimited,
             PendingReason::Provisioning,
             PendingReason::TypeChange,
+            PendingReason::TargetChange,
         ] {
             let pending =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
