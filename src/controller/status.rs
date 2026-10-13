@@ -3,7 +3,10 @@
 //! This module provides functions for updating the status of Kubernetes
 //! services, particularly for setting the load balancer ingress status.
 
-use k8s_openapi::{api::core::v1::{LoadBalancerIngress, Service}, serde_json::json};
+use k8s_openapi::{
+    api::core::v1::{LoadBalancerIngress, Service},
+    serde_json::json,
+};
 use kube::{ResourceExt, api::Patch, api::PatchParams};
 
 use crate::CurrentContext;
@@ -136,8 +139,16 @@ mod tests {
         assert_eq!(
             ingress,
             vec![
-                LoadBalancerIngress { ip: Some("203.0.113.10".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() },
-                LoadBalancerIngress { ip: Some("2001:db8::10".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() }
+                LoadBalancerIngress {
+                    ip: Some("203.0.113.10".to_string()),
+                    ip_mode: Some("VIP".to_string()),
+                    ..Default::default()
+                },
+                LoadBalancerIngress {
+                    ip: Some("2001:db8::10".to_string()),
+                    ip_mode: Some("VIP".to_string()),
+                    ..Default::default()
+                }
             ]
         );
     }
@@ -169,7 +180,8 @@ mod tests {
         let ingress = build_ingress(&test_load_balancer(), false, false, true);
         let value = k8s_openapi::serde_json::to_value(&ingress).expect("serialize");
         assert_eq!(value, json!([{"ip": "203.0.113.10", "ipMode": "VIP"}]));
-        let parsed: Vec<LoadBalancerIngress> = k8s_openapi::serde_json::from_value(value).expect("roundtrip");
+        let parsed: Vec<LoadBalancerIngress> =
+            k8s_openapi::serde_json::from_value(value).expect("roundtrip");
         assert_eq!(ingress, parsed);
     }
 
@@ -179,7 +191,11 @@ mod tests {
 
         assert_eq!(
             ingress,
-            vec![LoadBalancerIngress { ip: Some("10.10.0.5".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() }]
+            vec![LoadBalancerIngress {
+                ip: Some("10.10.0.5".to_string()),
+                ip_mode: Some("VIP".to_string()),
+                ..Default::default()
+            }]
         );
     }
 }
