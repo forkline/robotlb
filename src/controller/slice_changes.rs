@@ -219,9 +219,8 @@ mod tests {
     }
 
     fn with_owner(mut slice: EndpointSlice, service: Option<&str>) -> EndpointSlice {
-        slice.metadata.labels = service.map(|name| {
-            [("kubernetes.io/service-name".to_string(), name.to_string())].into()
-        });
+        slice.metadata.labels = service
+            .map(|name| [("kubernetes.io/service-name".to_string(), name.to_string())].into());
         slice
     }
 
@@ -234,7 +233,7 @@ mod tests {
         changes.track(&Event::InitApply(first.clone()));
         assert!(!changes.track(&Event::<EndpointSlice>::InitDone));
 
-        let second = with_owner(first.clone(), Some("service-b"));
+        let second = with_owner(first, Some("service-b"));
         // Main watch may get the event before the metadata watch.
         assert!(!changes.observe(&second, SliceTargetMode::ReadyEndpointNodes));
         assert!(changes.track(&Event::Apply(second.clone())));
@@ -255,7 +254,10 @@ mod tests {
         assert!(!changes.track(&Event::<EndpointSlice>::InitDone));
 
         changes.track(&Event::<EndpointSlice>::Init);
-        changes.track(&Event::InitApply(with_owner(first.clone(), Some("service-b"))));
+        changes.track(&Event::InitApply(with_owner(
+            first.clone(),
+            Some("service-b"),
+        )));
         assert!(changes.track(&Event::<EndpointSlice>::InitDone));
         assert!(changes.observe(
             &with_owner(first, Some("service-b")),
