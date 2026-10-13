@@ -30,7 +30,10 @@ impl PrometheusExporter {
 
     #[must_use]
     pub fn get_metrics(&self) -> Option<String> {
-        self.data.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        self.data
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn format_metrics(metrics: &ResourceMetrics) -> String {
@@ -221,13 +224,17 @@ static PROMETHEUS_EXPORTER: Mutex<Option<PrometheusExporter>> = Mutex::new(None)
 
 pub fn set_global_exporter(exporter: PrometheusExporter) {
     debug!("Setting global Prometheus exporter");
-    *PROMETHEUS_EXPORTER.lock().unwrap_or_else(PoisonError::into_inner) = Some(exporter);
+    *PROMETHEUS_EXPORTER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(exporter);
 }
 
 /// # Errors
 /// Returns an error string if the Prometheus exporter is not initialized or if no metrics are available yet.
 pub fn format_prometheus_metrics() -> Result<String, String> {
-    let exporter_guard = PROMETHEUS_EXPORTER.lock().unwrap_or_else(PoisonError::into_inner);
+    let exporter_guard = PROMETHEUS_EXPORTER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
 
     exporter_guard.as_ref().map_or_else(
         || Err("Prometheus exporter not initialized".to_string()),
