@@ -3,8 +3,12 @@
 //! This module contains the reconciliation logic for Kubernetes services
 //! with the `robotlb` load balancer class.
 
+mod event_throttle;
 mod nodes;
 mod status;
+
+pub(crate) use event_throttle::EventThrottle;
+use event_throttle::EventKey;
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -147,6 +151,22 @@ async fn publish_reconciliation_warning(
     context: &CurrentContext,
     error: &RobotLBError,
 ) {
+    let reason = warning_reason(error);
+    let note = event_note(error, &context.config.hcloud_token);
+    let event_key = EventKey {
+        service_uid: svc
+            .metadata
+            .uid
+            .clone()
+            .unwrap_or_else(|| format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())),
+        reason: reason.to_string(),
+        note: note.clone(),
+    };
+    let reserved_at = std::time::Instant::now();
+    if !context.event_throttle.reserve(&event_key, reserved_at) {
+        return;
+    }
+
     let recorder = Recorder::new(
         context.client.clone(),
         Reporter {
@@ -157,11 +177,12 @@ async fn publish_reconciliation_warning(
     let event = Event {
         type_: EventType::Warning,
         action: "Reconcile".to_string(),
-        reason: warning_reason(error).to_string(),
-        note: Some(event_note(error, &context.config.hcloud_token)),
+        reason: reason.to_string(),
+        note: Some(note),
         secondary: None,
     };
     if let Err(publish_error) = recorder.publish(&event, &svc.object_ref(&())).await {
+        context.event_throttle.release(&event_key, reserved_at);
         tracing::warn!(
             error = %publish_error,
             "Cannot publish reconciliation Warning Event"
