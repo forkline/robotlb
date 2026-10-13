@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2](https://github.com/forkline/robotlb/tree/0.7.2) - 2026-10-13
+
+### Fixed
+
+- Transparently recover pre-0.7 load balancers after upgrade (#73) ([c4a0996](https://github.com/forkline/robotlb/commit/c4a09961915a69cff85fb06ee4f7f8d2bd14c85a))
+
 ## [0.7.1](https://github.com/forkline/robotlb/tree/0.7.1) - 2026-10-13
 
 ### Fixed
