@@ -6,7 +6,6 @@ use super::{
     ensure_service_is_supported, patch_ingress_status,
 };
 use crate::{
-    consts,
     lb::DesiredLoadBalancer,
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
@@ -311,6 +310,7 @@ pub(super) fn error_action(
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+    use crate::consts;
     use crate::test_utils::fixtures::{service_spec, service_with_spec};
 
     #[test]
