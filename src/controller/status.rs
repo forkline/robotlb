@@ -3,7 +3,7 @@
 //! This module provides functions for updating the status of Kubernetes
 //! services, particularly for setting the load balancer ingress status.
 
-use k8s_openapi::{api::core::v1::Service, serde_json::Value, serde_json::json};
+use k8s_openapi::{api::core::v1::{LoadBalancerIngress, Service}, serde_json::json};
 use kube::{ResourceExt, api::Patch, api::PatchParams};
 
 use crate::CurrentContext;
@@ -16,41 +16,40 @@ pub fn build_ingress(
     enable_ipv6: bool,
     proxy_mode: bool,
     public_interface: bool,
-) -> Vec<Value> {
+) -> Vec<LoadBalancerIngress> {
     let ip_mode = if proxy_mode { "Proxy" } else { "VIP" };
     let mut ingress = vec![];
 
     if !public_interface {
         for private_net in &hcloud_lb.private_net {
             if let Some(ip) = &private_net.ip {
-                ingress.push(json!({
-                    "ip": ip,
-                    "ipMode": ip_mode
-                }));
+                ingress.push(LoadBalancerIngress {
+                    ip: Some(ip.clone()),
+                    ip_mode: Some(ip_mode.to_string()),
+                    ..Default::default()
+                });
             }
         }
         return ingress;
     }
 
-    let dns_ipv4 = hcloud_lb.public_net.ipv4.dns_ptr.clone().flatten();
     let ipv4 = hcloud_lb.public_net.ipv4.ip.clone().flatten();
-    let dns_ipv6 = hcloud_lb.public_net.ipv6.dns_ptr.clone().flatten();
     let ipv6 = hcloud_lb.public_net.ipv6.ip.clone().flatten();
 
     if let Some(ipv4) = &ipv4 {
-        ingress.push(json!({
-            "ip": ipv4,
-            "dns": dns_ipv4,
-            "ipMode": ip_mode
-        }));
+        ingress.push(LoadBalancerIngress {
+            ip: Some(ipv4.clone()),
+            ip_mode: Some(ip_mode.to_string()),
+            ..Default::default()
+        });
     }
 
     if enable_ipv6 && let Some(ipv6) = &ipv6 {
-        ingress.push(json!({
-            "ip": ipv6,
-            "dns": dns_ipv6,
-            "ipMode": ip_mode
-        }));
+        ingress.push(LoadBalancerIngress {
+            ip: Some(ipv6.clone()),
+            ip_mode: Some(ip_mode.to_string()),
+            ..Default::default()
+        });
     }
 
     ingress
@@ -60,7 +59,7 @@ pub fn build_ingress(
 pub async fn patch_ingress_status(
     svc: &Service,
     context: &CurrentContext,
-    ingress: Vec<Value>,
+    ingress: Vec<LoadBalancerIngress>,
 ) -> RobotLBResult<()> {
     if ingress.is_empty() {
         return Ok(());
@@ -68,15 +67,12 @@ pub async fn patch_ingress_status(
 
     // A status-only watch event must not trigger an identical status write,
     // otherwise two controllers can amplify a reconciliation loop.
-    let desired = Value::Array(ingress.clone());
     let current = svc
         .status
         .as_ref()
         .and_then(|status| status.load_balancer.as_ref())
         .and_then(|balancer| balancer.ingress.as_ref());
-    if current.is_some_and(|entries| {
-        k8s_openapi::serde_json::to_value(entries).is_ok_and(|value| value == desired)
-    }) {
+    if current.is_some_and(|entries| entries == &ingress) {
         return Ok(());
     }
 
@@ -136,18 +132,19 @@ mod tests {
         assert_eq!(
             ingress,
             vec![
-                json!({
-                    "ip": "203.0.113.10",
-                    "dns": "public.example.com",
-                    "ipMode": "VIP"
-                }),
-                json!({
-                    "ip": "2001:db8::10",
-                    "dns": "public-v6.example.com",
-                    "ipMode": "VIP"
-                })
+                LoadBalancerIngress { ip: Some("203.0.113.10".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() },
+                LoadBalancerIngress { ip: Some("2001:db8::10".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() }
             ]
         );
+    }
+
+    #[test]
+    fn ingress_uses_kubernetes_serializable_fields() {
+        let ingress = build_ingress(&test_load_balancer(), false, false, true);
+        let value = k8s_openapi::serde_json::to_value(&ingress).expect("serialize");
+        assert_eq!(value, json!([{"ip": "203.0.113.10", "ipMode": "VIP"}]));
+        let parsed: Vec<LoadBalancerIngress> = k8s_openapi::serde_json::from_value(value).expect("roundtrip");
+        assert_eq!(ingress, parsed);
     }
 
     #[test]
@@ -156,10 +153,7 @@ mod tests {
 
         assert_eq!(
             ingress,
-            vec![json!({
-                "ip": "10.10.0.5",
-                "ipMode": "VIP"
-            })]
+            vec![LoadBalancerIngress { ip: Some("10.10.0.5".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() }]
         );
     }
 }
