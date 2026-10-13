@@ -7,8 +7,8 @@ mod event_throttle;
 mod nodes;
 mod status;
 
-pub(crate) use event_throttle::EventThrottle;
 use event_throttle::EventKey;
+pub(crate) use event_throttle::EventThrottle;
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -154,11 +154,9 @@ async fn publish_reconciliation_warning(
     let reason = warning_reason(error);
     let note = event_note(error, &context.config.hcloud_token);
     let event_key = EventKey {
-        service_uid: svc
-            .metadata
-            .uid
-            .clone()
-            .unwrap_or_else(|| format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())),
+        service_uid: svc.metadata.uid.clone().unwrap_or_else(|| {
+            format!("{}/{}", svc.namespace().unwrap_or_default(), svc.name_any())
+        }),
         reason: reason.to_string(),
         note: note.clone(),
     };
