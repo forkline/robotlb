@@ -6,7 +6,7 @@ use super::{
     ensure_service_is_supported, patch_ingress_status,
 };
 use crate::{
-    lb::DesiredLoadBalancer,
+    lb::{DesiredLoadBalancer, LoadBalancer},
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
     finalizers, memo,
