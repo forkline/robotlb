@@ -28,6 +28,10 @@ pub enum RobotLBError {
     ParseBoolError(#[from] std::str::ParseBoolError),
     #[error("HCloud error: {0}")]
     HCloudError(String),
+    #[error("Invalid load balancer configuration: {0}")]
+    InvalidLoadBalancerConfiguration(String),
+    #[error("Cannot list Hetzner load balancer types: {0}")]
+    HCloudListLoadBalancerTypesError(#[from] hcloud::apis::Error<hcloud::apis::load_balancer_types_api::ListLoadBalancerTypesError>),
     #[error("Kube error: {0}")]
     KubeError(#[from] kube::Error),
     #[error("Unknown load balancing algorithm")]
@@ -117,6 +121,7 @@ impl RobotLBError {
             Self::HcloudLBChangeAlgorithm(e) => is_rate_limit(e),
             Self::HcloudListNetworksError(e) => is_rate_limit(e),
             Self::HcloudListLoadBalancersError(e) => is_rate_limit(e),
+            Self::HCloudListLoadBalancerTypesError(e) => is_rate_limit(e),
             _ => false,
         }
     }
