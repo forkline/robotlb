@@ -154,6 +154,14 @@ pub async fn reconcile_load_balancer(
     let desired_targets = derive_targets(nodes, desired_ip_type);
     let desired_services = derive_services(&svc);
 
+    // A Service without an allocated TCP nodePort cannot forward any traffic.
+    // Do not provision a billed but unusable Hetzner balancer.
+    if desired_services.is_empty() {
+        return Err(RobotLBError::Generic(
+            "Service has no TCP port with an allocated nodePort".to_string(),
+        ));
+    }
+
     apply_desired_state(&mut lb, desired_targets, desired_services);
 
     let hcloud_lb = lb.reconcile().await?;

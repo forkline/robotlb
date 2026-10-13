@@ -346,8 +346,23 @@ impl LoadBalancer {
     ) -> Vec<TargetReconcileAction> {
         let mut actions = Vec::new();
 
-        let desired_targets: HashSet<String> =
-            self.targets.iter().map(|ip| normalize_ip(ip)).collect();
+        // Keep the target set stable even if there are more eligible nodes than the
+        // Hetzner balancer type can accommodate. Unordered HashSet iteration would
+        // otherwise cause targets to churn on each reconciliation.
+        let max_targets = usize::try_from(hcloud_balancer.load_balancer_type.max_targets)
+            .unwrap_or(usize::MAX);
+        let mut ordered: Vec<_> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
+        ordered.sort_unstable();
+        ordered.dedup();
+        if ordered.len() > max_targets {
+            tracing::warn!(
+                selected = ordered.len(),
+                max_targets,
+                "Truncating load balancer targets to the Hetzner type limit"
+            );
+            ordered.truncate(max_targets);
+        }
+        let desired_targets: HashSet<String> = ordered.into_iter().collect();
         let current_targets: HashSet<String> = hcloud_balancer
             .targets
             .iter()

@@ -47,6 +47,9 @@ pub const DEFAULT_LB_ALGORITHM: &str = "least-connections";
 /// Default load balancer type.
 pub const DEFAULT_LB_BALANCER_TYPE: &str = "lb11";
 
+/// Kubernetes node label excluding the node from external load balancer targets.
+pub const EXCLUDE_FROM_LB_LABEL: &str = "node.kubernetes.io/exclude-from-external-load-balancers";
+
 /// Finalizer name used to prevent deletion before cleanup.
 pub const FINALIZER_NAME: &str = "robotlb/finalizer";
 /// Load balancer class name for Kubernetes services.
