@@ -154,6 +154,10 @@ pub enum RobotLBError {
     HcloudLBChangeAlgorithm(
         #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::ChangeAlgorithmError>,
     ),
+    #[error("Cannot inspect Hetzner load balancer action. Reason: {}", describe_hcloud(.0))]
+    HcloudLBGetActionError(
+        #[from] hcloud::apis::Error<hcloud::apis::load_balancers_api::GetLoadBalancerActionError>,
+    ),
     #[error("Cannot list networks. Reason: {}", describe_hcloud(.0))]
     HcloudListNetworksError(
         #[from] hcloud::apis::Error<hcloud::apis::networks_api::ListNetworksError>,
@@ -183,6 +187,7 @@ impl RobotLBError {
             Self::HcloudLBUpdateServiceError(e) => is_rate_limit(e),
             Self::HcloudLBChangeType(e) => is_rate_limit(e),
             Self::HcloudLBChangeAlgorithm(e) => is_rate_limit(e),
+            Self::HcloudLBGetActionError(e) => is_rate_limit(e),
             Self::HcloudListNetworksError(e) => is_rate_limit(e),
             Self::HcloudListLoadBalancersError(e) => is_rate_limit(e),
             Self::HCloudListLoadBalancerTypesError(e) => is_rate_limit(e),
@@ -224,6 +229,7 @@ impl RobotLBError {
             Self::HcloudLBUpdateServiceError(e) => is_transient_hcloud(e),
             Self::HcloudLBChangeType(e) => is_transient_hcloud(e),
             Self::HcloudLBChangeAlgorithm(e) => is_transient_hcloud(e),
+            Self::HcloudLBGetActionError(e) => is_transient_hcloud(e),
             Self::HCloudLBAttachToNetworkError(e) => is_transient_hcloud(e),
             Self::HcloudLBDetachFromNetworkError(e) => is_transient_hcloud(e),
             Self::HcloudLBDeleteError(e) => is_transient_hcloud(e),

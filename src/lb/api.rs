@@ -13,8 +13,9 @@ use hcloud::{
         load_balancers_api::{
             AddServiceParams, AddTargetParams, AttachLoadBalancerToNetworkParams,
             ChangeAlgorithmParams, ChangeTypeOfLoadBalancerParams, DeleteLoadBalancerParams,
-            DeleteServiceParams, DetachLoadBalancerFromNetworkParams, ListLoadBalancersParams,
-            RemoveTargetParams, ReplaceLoadBalancerParams, UpdateServiceParams,
+            DeleteServiceParams, DetachLoadBalancerFromNetworkParams, GetLoadBalancerActionParams,
+            ListLoadBalancersParams, RemoveTargetParams, ReplaceLoadBalancerParams,
+            UpdateServiceParams,
         },
         networks_api::ListNetworksParams,
     },
@@ -56,10 +57,18 @@ pub trait HcloudLoadBalancerApi: Send + Sync {
     ) -> RobotLBResult<()>;
 
     /// Remove a target from the load balancer.
-    async fn remove_target(&self, load_balancer_id: i64, target_ip: String) -> RobotLBResult<()>;
+    async fn remove_target(
+        &self,
+        load_balancer_id: i64,
+        target_ip: String,
+    ) -> RobotLBResult<hcloud::models::Action>;
 
     /// Add a target to the load balancer.
-    async fn add_target(&self, load_balancer_id: i64, target_ip: String) -> RobotLBResult<()>;
+    async fn add_target(
+        &self,
+        load_balancer_id: i64,
+        target_ip: String,
+    ) -> RobotLBResult<hcloud::models::Action>;
 
     /// Change the load balancing algorithm.
     async fn change_algorithm(
@@ -69,7 +78,13 @@ pub trait HcloudLoadBalancerApi: Send + Sync {
     ) -> RobotLBResult<()>;
 
     /// Change the load balancer type.
-    async fn change_type(&self, load_balancer_id: i64, balancer_type: String) -> RobotLBResult<()>;
+    async fn change_type(
+        &self,
+        load_balancer_id: i64,
+        balancer_type: String,
+    ) -> RobotLBResult<hcloud::models::Action>;
+
+    async fn get_action(&self, action_id: i64) -> RobotLBResult<hcloud::models::Action>;
 }
 
 /// Live implementation of the Hetzner Cloud API.
@@ -123,8 +138,12 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
         Ok(())
     }
 
-    async fn remove_target(&self, load_balancer_id: i64, target_ip: String) -> RobotLBResult<()> {
-        hcloud::apis::load_balancers_api::remove_target(
+    async fn remove_target(
+        &self,
+        load_balancer_id: i64,
+        target_ip: String,
+    ) -> RobotLBResult<hcloud::models::Action> {
+        let response = hcloud::apis::load_balancers_api::remove_target(
             &self.hcloud_config,
             RemoveTargetParams {
                 id: load_balancer_id,
@@ -137,11 +156,15 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             },
         )
         .await?;
-        Ok(())
+        Ok(*response.action)
     }
 
-    async fn add_target(&self, load_balancer_id: i64, target_ip: String) -> RobotLBResult<()> {
-        hcloud::apis::load_balancers_api::add_target(
+    async fn add_target(
+        &self,
+        load_balancer_id: i64,
+        target_ip: String,
+    ) -> RobotLBResult<hcloud::models::Action> {
+        let response = hcloud::apis::load_balancers_api::add_target(
             &self.hcloud_config,
             AddTargetParams {
                 id: load_balancer_id,
@@ -154,7 +177,7 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             },
         )
         .await?;
-        Ok(())
+        Ok(*response.action)
     }
 
     async fn change_algorithm(
@@ -173,8 +196,12 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
         Ok(())
     }
 
-    async fn change_type(&self, load_balancer_id: i64, balancer_type: String) -> RobotLBResult<()> {
-        hcloud::apis::load_balancers_api::change_type_of_load_balancer(
+    async fn change_type(
+        &self,
+        load_balancer_id: i64,
+        balancer_type: String,
+    ) -> RobotLBResult<hcloud::models::Action> {
+        let response = hcloud::apis::load_balancers_api::change_type_of_load_balancer(
             &self.hcloud_config,
             ChangeTypeOfLoadBalancerParams {
                 id: load_balancer_id,
@@ -184,7 +211,16 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             },
         )
         .await?;
-        Ok(())
+        Ok(*response.action)
+    }
+
+    async fn get_action(&self, action_id: i64) -> RobotLBResult<hcloud::models::Action> {
+        let response = hcloud::apis::load_balancers_api::get_load_balancer_action(
+            &self.hcloud_config,
+            GetLoadBalancerActionParams { id: action_id },
+        )
+        .await?;
+        Ok(*response.action)
     }
 }
 

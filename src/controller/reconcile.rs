@@ -9,7 +9,7 @@ use crate::{
     CurrentContext,
     error::{RobotLBError, RobotLBResult},
     finalizers,
-    lb::{DesiredLoadBalancer, LoadBalancer},
+    lb::{DesiredLoadBalancer, LoadBalancer, LoadBalancerReconcile},
     memo,
     metrics::ReconcileTimer,
 };
@@ -35,6 +35,8 @@ pub(super) enum ReconcileOutcome {
 pub(super) enum PendingReason {
     RateLimited,
     Provisioning,
+    TypeChange,
+    TargetChange,
 }
 
 impl ReconcileOutcome {
@@ -111,6 +113,9 @@ enum ServiceDisposition {
 }
 
 fn classify_service(svc: &Service) -> ServiceDisposition {
+    // Deletion is always eligible for a best-effort UID-verified cleanup.
+    // A finalizer guards deletion but is not the source of cloud ownership:
+    // it might have been removed even when an owned LB still exists.
     if svc.meta().deletion_timestamp.is_some()
         || (finalizers::check(svc) && ensure_service_is_supported(svc).is_err())
     {
@@ -210,7 +215,18 @@ async fn reconcile_load_balancer(
         return Ok(ReconcileOutcome::Unchanged(Action::requeue(wait)));
     }
 
-    let hcloud_lb = lb.reconcile().await?;
+    let (hcloud_lb, targets_pending) = match lb.reconcile().await? {
+        LoadBalancerReconcile::Reconciled(lb) => (lb, false),
+        LoadBalancerReconcile::TypeChangePending => {
+            // The resize Action finished; read the new provider capacity on
+            // the next pass before touching any targets.
+            return Ok(ReconcileOutcome::Deferred(
+                PendingReason::TypeChange,
+                Action::requeue(Duration::from_secs(1)),
+            ));
+        }
+        LoadBalancerReconcile::TargetsPending(lb) => (lb, true),
+    };
 
     let ingress = build_ingress(
         &hcloud_lb,
@@ -218,6 +234,22 @@ async fn reconcile_load_balancer(
         lb.proxy_mode,
         lb.public_interface,
     );
+    // Ingress publication must not wait for all target changes. ExternalDNS
+    // can use the LB address while Hetzner completes target reconciliation.
+    // Never memoize the unfinished target set.
+    if !ingress.is_empty() {
+        patch_ingress_status(&svc, &context, ingress.clone()).await?;
+        if let Some(uid) = uid.as_deref() {
+            context.memo.clear_pending(uid);
+        }
+    }
+    if targets_pending {
+        return Ok(ReconcileOutcome::Deferred(
+            PendingReason::TargetChange,
+            Action::requeue(Duration::from_secs(1)),
+        ));
+    }
+
     // Hetzner may acknowledge creation or network attachment before assigning an
     // address. A successful API response is not a complete LoadBalancer reconcile
     // until Kubernetes can advertise an ingress address. In particular, never
@@ -242,11 +274,6 @@ async fn reconcile_load_balancer(
             Action::requeue(INGRESS_RETRY_INTERVAL),
         ));
     }
-    patch_ingress_status(&svc, &context, ingress.clone()).await?;
-    if let Some(uid) = uid.as_deref() {
-        context.memo.clear_pending(uid);
-    }
-
     let resync = Duration::from_secs(context.config.resync_interval);
     if let Some(uid) = uid {
         context.memo.record(
@@ -336,6 +363,9 @@ mod policy_tests {
             Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                 k8s_openapi::jiff::Timestamp::now(),
             ));
+        // Even without a finalizer, an owned Hetzner resource may still exist.
+        assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
+        svc.metadata.finalizers = Some(vec![consts::FINALIZER_NAME.to_string()]);
         assert_eq!(classify_service(&svc), ServiceDisposition::Cleanup);
     }
 
@@ -349,7 +379,12 @@ mod policy_tests {
             assert!(outcome.was_successful());
             assert!(should_reset_failure_backoff(&Ok(outcome)));
         }
-        for reason in [PendingReason::RateLimited, PendingReason::Provisioning] {
+        for reason in [
+            PendingReason::RateLimited,
+            PendingReason::Provisioning,
+            PendingReason::TypeChange,
+            PendingReason::TargetChange,
+        ] {
             let pending =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
             assert!(!pending.was_successful());
