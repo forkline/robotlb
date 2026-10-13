@@ -68,6 +68,7 @@ impl DesiredLoadBalancer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use crate::test_utils::fixtures::{service_spec, service_with_spec};
 
     #[test]
