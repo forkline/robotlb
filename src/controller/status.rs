@@ -55,6 +55,15 @@ pub fn build_ingress(
     ingress
 }
 
+/// Compare structured Kubernetes status, not intermediary provider JSON.
+fn ingress_is_current(svc: &Service, ingress: &[LoadBalancerIngress]) -> bool {
+    svc.status
+        .as_ref()
+        .and_then(|status| status.load_balancer.as_ref())
+        .and_then(|balancer| balancer.ingress.as_ref())
+        .is_some_and(|entries| entries == ingress)
+}
+
 /// Patch the service status with the load balancer ingress.
 pub async fn patch_ingress_status(
     svc: &Service,
@@ -67,12 +76,7 @@ pub async fn patch_ingress_status(
 
     // A status-only watch event must not trigger an identical status write,
     // otherwise two controllers can amplify a reconciliation loop.
-    let current = svc
-        .status
-        .as_ref()
-        .and_then(|status| status.load_balancer.as_ref())
-        .and_then(|balancer| balancer.ingress.as_ref());
-    if current.is_some_and(|entries| entries == &ingress) {
+    if ingress_is_current(svc, &ingress) {
         return Ok(());
     }
 
@@ -136,6 +140,28 @@ mod tests {
                 LoadBalancerIngress { ip: Some("2001:db8::10".to_string()), ip_mode: Some("VIP".to_string()), ..Default::default() }
             ]
         );
+    }
+
+    #[test]
+    fn unchanged_ingress_does_not_require_a_status_patch() {
+        use k8s_openapi::api::core::v1::{LoadBalancerStatus, ServiceStatus};
+
+        let ingress = build_ingress(&test_load_balancer(), false, false, true);
+        let mut svc = Service {
+            status: Some(ServiceStatus {
+                load_balancer: Some(LoadBalancerStatus {
+                    ingress: Some(ingress.clone()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(ingress_is_current(&svc, &ingress));
+
+        let changed = build_ingress(&test_load_balancer(), true, false, true);
+        assert!(!ingress_is_current(&svc, &changed));
+        svc.status = None;
+        assert!(!ingress_is_current(&svc, &ingress));
     }
 
     #[test]
