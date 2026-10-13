@@ -200,12 +200,19 @@ pub async fn get_load_balancer(
     hcloud_config: &HcloudConfig,
     name: &str,
 ) -> RobotLBResult<Option<hcloud::models::LoadBalancer>> {
+    // Hetzner ignores an empty name filter and may return unrelated balancers.
+    // Always match locally before considering a resource for reconciliation.
     let hcloud_balancers = list_load_balancers(hcloud_config, Some(name.to_string())).await?;
-    if hcloud_balancers.load_balancers.len() > 1 {
+    let matching: Vec<_> = hcloud_balancers
+        .load_balancers
+        .into_iter()
+        .filter(|balancer| balancer.name == name)
+        .collect();
+    if matching.len() > 1 {
         tracing::warn!("Found more than one balancer with name {name}, skipping");
         return Err(RobotLBError::SkipService);
     }
-    Ok(hcloud_balancers.load_balancers.into_iter().next())
+    Ok(matching.into_iter().next())
 }
 
 /// Create a new load balancer.

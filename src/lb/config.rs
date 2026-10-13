@@ -67,6 +67,17 @@ pub fn parse_load_balancer_config(
         .cloned()
         .unwrap_or_else(|| svc.name_any());
 
+    if name.is_empty() {
+        return Err(RobotLBError::Generic(
+            "robotlb/balancer must not be empty".to_string(),
+        ));
+    }
+    if network_name.as_deref() == Some("") {
+        return Err(RobotLBError::Generic(
+            "robotlb/lb-network must not be empty".to_string(),
+        ));
+    }
+
     let private_ip = svc
         .annotations()
         .get(consts::LB_PRIVATE_IP_ANNOTATION)

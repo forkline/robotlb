@@ -106,7 +106,11 @@ async fn reconcile_finalizers(
         return Ok(());
     }
 
-    apply_patch(&api, service_name.as_str(), &desired, None).await
+    // Never replace the entire finalizer list without a resource-version guard.
+    // Another controller may have changed it while we retried.
+    Err(RobotLBError::Generic(format!(
+        "Service {service_name} finalizers changed concurrently; retry reconciliation"
+    )))
 }
 
 /// Add finalizer to the service.

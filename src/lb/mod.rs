@@ -548,8 +548,13 @@ impl LoadBalancer {
             return Ok(None);
         };
         let response = api::list_networks(&self.hcloud_config, Some(network_name.clone())).await?;
+        let networks: Vec<_> = response
+            .networks
+            .into_iter()
+            .filter(|network| network.name == network_name)
+            .collect();
 
-        if response.networks.len() > 1 {
+        if networks.len() > 1 {
             tracing::warn!(
                 "Found more than one network with name {}, skipping",
                 network_name
@@ -558,14 +563,14 @@ impl LoadBalancer {
                 "Found more than one network with name {network_name}"
             )));
         }
-        if response.networks.is_empty() {
+        if networks.is_empty() {
             tracing::warn!("Network with name {} not found", network_name);
             return Err(RobotLBError::HCloudError(format!(
                 "Network with name {network_name} not found"
             )));
         }
 
-        Ok(response.networks.into_iter().next())
+        Ok(networks.into_iter().next())
     }
 }
 
