@@ -102,8 +102,14 @@ mod tests {
         assert!(!changes.observe(&Event::InitApply(node("a", "True"))));
         assert!(changes.observe(&Event::InitDone));
         let mut heartbeat = node("a", "True");
-        heartbeat.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].message =
-            Some("kubelet heartbeat".to_string());
+        heartbeat
+            .status
+            .as_mut()
+            .unwrap()
+            .conditions
+            .as_mut()
+            .unwrap()[0]
+            .message = Some("kubelet heartbeat".to_string());
         assert!(!changes.observe(&Event::Apply(heartbeat)));
         assert!(changes.observe(&Event::Apply(node("a", "False"))));
         assert!(!changes.observe(&Event::Apply(node("a", "False"))));
@@ -111,8 +117,14 @@ mod tests {
         let mut cordoned = node("a", "False");
         cordoned.spec.as_mut().unwrap().unschedulable = Some(true);
         assert!(changes.observe(&Event::Apply(cordoned.clone())));
-        cordoned.status.as_mut().unwrap().addresses.as_mut().unwrap()[0].address =
-            "192.0.2.11".to_string();
+        cordoned
+            .status
+            .as_mut()
+            .unwrap()
+            .addresses
+            .as_mut()
+            .unwrap()[0]
+            .address = "192.0.2.11".to_string();
         assert!(changes.observe(&Event::Apply(cordoned)));
         assert!(changes.observe(&Event::Delete(node("a", "False"))));
     }
