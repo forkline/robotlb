@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/forkline/robotlb/tree/0.7.1) - 2026-10-13
+
+### Fixed
+
+- controller: Correct extracted module visibility and recorder initialization ([cb87115](https://github.com/forkline/robotlb/commit/cb8711547183809c978d48b46b1f491cca66b8b8))
+- controller: Correct extracted module visibility and recorder initialization ([0ffcaf3](https://github.com/forkline/robotlb/commit/0ffcaf317427010d46e57e75a432180b932c9590))
+- controller: Correct extracted module visibility and recorder initialization ([83d5bd0](https://github.com/forkline/robotlb/commit/83d5bd02d91f8d42fca035142d597b970c14d4c1))
+- controller: Import reconciliation fingerprint memo ([fe632b0](https://github.com/forkline/robotlb/commit/fe632b0453ca449e46aef5d5c508fd98c6ef879e))
+- controller: Use explicit imports and satisfy strict Clippy policy ([4f3a1b1](https://github.com/forkline/robotlb/commit/4f3a1b1cca5e73170b5951ec8017323ff0b6bff3))
+- controller: Use explicit imports and satisfy strict Clippy policy ([a101b58](https://github.com/forkline/robotlb/commit/a101b58685d61f32870c098c78bb451caf5f3bff))
+- controller: Use explicit imports and satisfy strict Clippy policy ([f6e0986](https://github.com/forkline/robotlb/commit/f6e0986b9a15d3bc618a7852866e07c8bfa9c017))
+- controller: Clean unused imports and move explicit dependencies ([2ff5572](https://github.com/forkline/robotlb/commit/2ff55727ee1c9f16dcc332bff873f25d12890c1d))
+- controller: Clean unused imports and move explicit dependencies ([a7736c0](https://github.com/forkline/robotlb/commit/a7736c03541289fc59bd58c19656ca3033d9c27a))
+- controller: Apply CI rustfmt and kube Resource import ([a0fa3b3](https://github.com/forkline/robotlb/commit/a0fa3b3f8070cc3c9c081d00768edd1517c19d9f))
+- controller: Apply CI rustfmt and kube Resource import ([ada0f1a](https://github.com/forkline/robotlb/commit/ada0f1ae9bfee046618b5116a7fd171119afbc16))
+- controller: Apply CI rustfmt and kube Resource import ([9dc1345](https://github.com/forkline/robotlb/commit/9dc134535e7237205061c129754abeb6c42d6b7e))
+- controller: Apply CI rustfmt and kube Resource import ([9bc5db7](https://github.com/forkline/robotlb/commit/9bc5db74fbdb778f284cd2f6a28032f8a3f95eba))
+- controller: Use explicit imports and satisfy strict Clippy policy ([43c995c](https://github.com/forkline/robotlb/commit/43c995c7e3107eac0519a4550a3402eb7e695cd2))
+- controller: Use explicit imports and satisfy strict Clippy policy ([8cd2f14](https://github.com/forkline/robotlb/commit/8cd2f142b58aa8fe868c34953bb302be58b34359))
+- controller: Use explicit imports and satisfy strict Clippy policy ([13f1336](https://github.com/forkline/robotlb/commit/13f1336e888b28c4364606ddda11b5570ce5c6f1))
+- controller: Clean unused imports and move explicit dependencies ([3314c7c](https://github.com/forkline/robotlb/commit/3314c7cd370ae953056adb2558e9926f92693bd4))
+- controller: Clean unused imports and move explicit dependencies ([051c0aa](https://github.com/forkline/robotlb/commit/051c0aa0680a4ff010ab4fea6fe99a4a45386983))
+- controller: Apply CI rustfmt and kube Resource import ([530783e](https://github.com/forkline/robotlb/commit/530783e8fb55f88bfda7a87550beb10ac6a132db))
+- controller: Apply CI rustfmt and kube Resource import ([e006bab](https://github.com/forkline/robotlb/commit/e006bab810e30813c13e62a64029ad411975da6f))
+- controller: Align event imports and recorder formatting ([d0c2928](https://github.com/forkline/robotlb/commit/d0c29285573cdde65427a0326d904fa70d7a1c7e))
+- controller: Align event imports and recorder formatting ([78475b5](https://github.com/forkline/robotlb/commit/78475b5983cef5978b059fe168c326b24ff6146f))
+- controller: Use explicit imports and satisfy strict Clippy policy ([8632343](https://github.com/forkline/robotlb/commit/8632343800d8f6ee5531a079689dfff6d00616a4))
+- controller: Use explicit imports and satisfy strict Clippy policy ([888ccaf](https://github.com/forkline/robotlb/commit/888ccaf511c6076dacaea44d29d54918f9100dd7))
+- controller: Use explicit imports and satisfy strict Clippy policy ([de1b841](https://github.com/forkline/robotlb/commit/de1b841c68f8f9d9f13cb2faff57d24ed4e79fb0))
+- controller: Clean unused imports and move explicit dependencies ([489f69e](https://github.com/forkline/robotlb/commit/489f69eeb19b2ee807362d4ac74f9f43779e4247))
+- controller: Clean unused imports and move explicit dependencies ([84b5332](https://github.com/forkline/robotlb/commit/84b5332cd02eecbcdae954bceb4cef24ec6b04f2))
+- controller: Apply CI rustfmt and kube Resource import ([0362a22](https://github.com/forkline/robotlb/commit/0362a22149be24ea57c561094e2f4f98bd6166b9))
+- controller: Apply CI rustfmt and kube Resource import ([3efb766](https://github.com/forkline/robotlb/commit/3efb76671d8d759604c8149c628b12c2fd620270))
+- controller: Apply CI rustfmt and kube Resource import ([06e3409](https://github.com/forkline/robotlb/commit/06e34098386f5663b07b280054d1e176a8cd742c))
+- controller: Apply CI rustfmt and kube Resource import ([3034dff](https://github.com/forkline/robotlb/commit/3034dffcb8bebd64029fefedca17f76f6b5c32bd))
+- lb: Import cleanup executor and apply cargo fmt to desired-state tests ([ed83ed5](https://github.com/forkline/robotlb/commit/ed83ed50febfe4c0368ac8af0628a568fc61e445))
+- lb: Import cleanup executor and apply cargo fmt to desired-state tests ([c171ab5](https://github.com/forkline/robotlb/commit/c171ab531ea090520555ea66e8478ea981cae928))
+- lb: Satisfy cargo fmt and pedantic Clippy in controller modules ([bb9c483](https://github.com/forkline/robotlb/commit/bb9c483eaca53f42eeb13176cff39807461f7bac))
+- lb: Capacity-safe rolling target replacement and UID-owned cleanup (#70) ([70667ee](https://github.com/forkline/robotlb/commit/70667eeedccb147ee27c3e4b0d84831bb5406cd0))
+- tests: Scope finalizer constant import to policy tests ([f267de1](https://github.com/forkline/robotlb/commit/f267de175ea01c2a98058f20c283a075723bb9c0))
+- Transparently adopt legacy Hetzner load balancers (#71) ([f4be0fa](https://github.com/forkline/robotlb/commit/f4be0faac3a331bcfb2376212b041c8b9174bca9))
+
+### Refactor
+
+- controller: Add src/controller/reconcile.rs ([490b740](https://github.com/forkline/robotlb/commit/490b740b00321774ced8200db4b2b580875fa8ec))
+- controller: Add src/controller/events.rs ([e58dc46](https://github.com/forkline/robotlb/commit/e58dc461621451a66a88fb0f9fd62754c4f61d34))
+- controller: Add docs/controller-refactor-plan.md ([550e08f](https://github.com/forkline/robotlb/commit/550e08f026e302c008b21ccfef97a3cc090304c6))
+- controller: Extract reconciliation and event responsibilities ([537cb8a](https://github.com/forkline/robotlb/commit/537cb8a6c1f5acec0864dd95e7512d1467b3c6b9))
+- controller: Extract reconciliation and event responsibilities ([01c596b](https://github.com/forkline/robotlb/commit/01c596b281b4c86a82c16828c3634226607a5446))
+- lb: Resolve typed desired state independently of Hetzner API ([9195b83](https://github.com/forkline/robotlb/commit/9195b8353d28b6ad6b668b6e508d5c61ef8ab82b))
+- lb: Add typed, API-independent desired state ([bec3db7](https://github.com/forkline/robotlb/commit/bec3db7c636a81c148c4da0e2870420f35fa1a16))
+- lb: Separate typed desired state from Hetzner executor ([b99d117](https://github.com/forkline/robotlb/commit/b99d1173e9536951515e8aa5c800e4c42b754b73))
+- lb: Separate typed desired state from Hetzner executor ([71dafd7](https://github.com/forkline/robotlb/commit/71dafd71c045fb822f8781a4044504b4c2c411a8))
+- lb: Separate typed desired state from Hetzner executor ([9afb0e1](https://github.com/forkline/robotlb/commit/9afb0e1c2fbfaa8c6f1d9c29a96f45950a74ac1c))
+- lb: Separate typed desired state from Hetzner executor ([dd39a8f](https://github.com/forkline/robotlb/commit/dd39a8f9f2c623994bbd2afc64529d5defdf481a))
+- lb: Separate typed desired state from Hetzner executor ([4466328](https://github.com/forkline/robotlb/commit/44663284977ff352d733ce2afdf06d7bec619b30))
+
+### Styling
+
+- controller: Match cargo fmt output ([55fcc83](https://github.com/forkline/robotlb/commit/55fcc83af29d9823f1712344af735c20c31f794a))
+- controller: Match cargo fmt output ([65abea2](https://github.com/forkline/robotlb/commit/65abea2e1333cb8df1428653c2fbb4a54eef3bee))
+- controller: Match cargo fmt output in reconciliation policy tests ([ddf8c56](https://github.com/forkline/robotlb/commit/ddf8c568f456f79fa6cd7dba692efcb0d2500ddf))
+
+### Testing
+
+- controller: Verify lifecycle, event and partial-convergence invariants ([eebf4c4](https://github.com/forkline/robotlb/commit/eebf4c4e8a59c4eb36e755d1476f1eff46397a48))
+- controller: Verify lifecycle, event and partial-convergence invariants ([bec65ad](https://github.com/forkline/robotlb/commit/bec65ad585fadbd1e8d347e5abc3f6bfc5348995))
+- controller: Verify lifecycle, event and partial-convergence invariants ([96df760](https://github.com/forkline/robotlb/commit/96df760780d79eb3b5872f240fd6d60808688286))
+- controller: Avoid moving a shared kube-rs Action ([f436e83](https://github.com/forkline/robotlb/commit/f436e8388768d106ad92d3a40134c19250269062))
+- controller: Validate reconciliation policy and partial-provider recovery ([1c2de29](https://github.com/forkline/robotlb/commit/1c2de299f4d5f668dd92fcce23477f8f830f7f49))
+- controller: Reconcile policies and recovery with typed desired state ([e38e245](https://github.com/forkline/robotlb/commit/e38e245a43bbd394a641f6f8f977cd273c1bacec))
+
 ## [0.7.0](https://github.com/forkline/robotlb/tree/0.7.0) - 2026-10-13
 
 ### Added
