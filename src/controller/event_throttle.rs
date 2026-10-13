@@ -13,7 +13,7 @@ const REPEAT_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Identifies the exact error shown on a particular Service.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct EventKey {
+pub struct EventKey {
     pub service_uid: String,
     pub reason: String,
     pub note: String,
@@ -21,7 +21,7 @@ pub(crate) struct EventKey {
 
 /// Records recent Event publication attempts for one controller instance.
 #[derive(Debug, Default)]
-pub(crate) struct EventThrottle {
+pub struct EventThrottle {
     recent: Mutex<HashMap<EventKey, Instant>>,
 }
 
@@ -76,7 +76,10 @@ mod tests {
         let now = Instant::now();
         assert!(throttle.reserve(&key("uid-a", "SyncLoadBalancerFailed", "503"), now));
         assert!(throttle.reserve(&key("uid-b", "SyncLoadBalancerFailed", "503"), now));
-        assert!(throttle.reserve(&key("uid-a", "InvalidLoadBalancerConfiguration", "503"), now));
+        assert!(throttle.reserve(
+            &key("uid-a", "InvalidLoadBalancerConfiguration", "503"),
+            now
+        ));
         assert!(throttle.reserve(&key("uid-a", "SyncLoadBalancerFailed", "502"), now));
     }
 
@@ -107,13 +110,13 @@ mod tests {
         let now = Instant::now();
         let event = key("uid", "SyncLoadBalancerFailed", "503");
         let reservations: usize = std::thread::scope(|scope| {
-            let tasks: Vec<_> = (0..8)
-                .map(|_| {
-                    let throttle = throttle.clone();
-                    let event = event.clone();
-                    scope.spawn(move || usize::from(throttle.reserve(&event, now)))
-                })
-                .collect();
+            // Spawn all workers before joining to exercise concurrent reservations.
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let throttle = throttle.clone();
+                let event = event.clone();
+                tasks.push(scope.spawn(move || usize::from(throttle.reserve(&event, now))));
+            }
             tasks.into_iter().map(|task| task.join().unwrap()).sum()
         });
         assert_eq!(reservations, 1);
