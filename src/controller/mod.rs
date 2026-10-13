@@ -99,7 +99,7 @@ impl ReconcileOutcome {
     }
 }
 
-fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
+const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
     matches!(
         result,
         Ok(ReconcileOutcome::Applied(_)) | Err(RobotLBError::SkipService)
@@ -318,7 +318,9 @@ async fn reconcile_load_balancer(
     Ok(ReconcileOutcome::Applied(Action::requeue(resync)))
 }
 
-fn should_retry_missing_ingress(ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress]) -> bool {
+const fn should_retry_missing_ingress(
+    ingress: &[k8s_openapi::api::core::v1::LoadBalancerIngress],
+) -> bool {
     ingress.is_empty()
 }
 
@@ -593,10 +595,12 @@ mod tests {
             error_action(&error, &rate_limit, &backoff, now, svc),
             Action::requeue(Duration::from_secs(10))
         );
-        assert!(should_reset_failure_backoff(&Ok(ReconcileOutcome::Applied(
-            Action::await_change()
-        ))));
-        assert!(should_reset_failure_backoff(&Err(RobotLBError::SkipService)));
+        assert!(should_reset_failure_backoff(&Ok(
+            ReconcileOutcome::Applied(Action::await_change())
+        )));
+        assert!(should_reset_failure_backoff(&Err(
+            RobotLBError::SkipService
+        )));
         assert!(!should_reset_failure_backoff(&Err(error)));
     }
 
