@@ -248,7 +248,7 @@ mod tests {
     fn a_robotlb_annotation_changes_the_fingerprint() {
         let mut svc = service();
         svc.annotations_mut().insert(
-            consts::LB_LOCATION_LABEL_NAME.to_string(),
+            consts::LB_LOCATION_ANNOTATION.to_string(),
             "nbg1".to_string(),
         );
         assert_ne!(print(&svc), print(&service()));
