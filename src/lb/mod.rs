@@ -9,7 +9,11 @@ mod api;
 mod config;
 mod types;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    time::Duration,
+};
 
 use hcloud::{
     apis::configuration::Configuration as HcloudConfig,
@@ -249,11 +253,16 @@ impl LoadBalancer {
             match action {
                 TargetReconcileAction::Remove { target_ip } => {
                     tracing::info!("Removing target {}", target_ip);
-                    api.remove_target(hcloud_balancer.id, target_ip).await?;
+                    retry_temporary(|| api.remove_target(hcloud_balancer.id, target_ip.clone())).await?;
                 }
                 TargetReconcileAction::Add { target_ip } => {
                     tracing::info!("Adding target {}", target_ip);
-                    api.add_target(hcloud_balancer.id, target_ip).await?;
+                    match retry_temporary(|| api.add_target(hcloud_balancer.id, target_ip.clone())).await {
+                        Err(error) if error.target_already_defined() => {
+                            tracing::debug!("Target was already added in an earlier attempt");
+                        }
+                        result => result?,
+                    }
                 }
             }
         }
@@ -275,7 +284,7 @@ impl LoadBalancer {
                 hcloud_balancer.algorithm,
                 algorithm
             );
-            api.change_algorithm(hcloud_balancer.id, algorithm).await?;
+            retry_temporary(|| api.change_algorithm(hcloud_balancer.id, algorithm.clone())).await?;
         }
         Ok(())
     }
@@ -292,7 +301,7 @@ impl LoadBalancer {
                 hcloud_balancer.load_balancer_type.name,
                 balancer_type
             );
-            api.change_type(hcloud_balancer.id, balancer_type).await?;
+            retry_temporary(|| api.change_type(hcloud_balancer.id, balancer_type.clone())).await?;
         }
         Ok(())
     }
@@ -636,6 +645,23 @@ impl LoadBalancer {
 
         Ok(networks.into_iter().next())
     }
+}
+
+/// Retry temporary Hetzner conflicts without treating permanent errors or 429s as transient.
+async fn retry_temporary<T, F, Fut>(mut operation: F) -> RobotLBResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RobotLBResult<T>>,
+{
+    for attempt in 0..=2_u64 {
+        match operation().await {
+            Err(error) if error.is_transient_hcloud() && attempt < 2 => {
+                tokio::time::sleep(Duration::from_secs(attempt + 1)).await;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("all retry paths return on the final attempt")
 }
 
 /// Conservative migration: legacy balancers can be adopted only if they use IP
