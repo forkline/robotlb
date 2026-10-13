@@ -3,7 +3,7 @@
 use super::event_throttle::EventKey;
 use crate::{CurrentContext, error::RobotLBError};
 use k8s_openapi::api::core::v1::Service;
-use kube::ResourceExt;
+use kube::{Resource, ResourceExt};
 use kube::runtime::events::{Event, EventType};
 
 /// Display the last error on the Service without leaking Hetzner API credentials.
