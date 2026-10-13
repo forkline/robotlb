@@ -3,9 +3,8 @@
 use super::events::publish_reconciliation_warning;
 use super::{
     apply_desired_state, build_ingress, derive_services, derive_targets, discover_target_nodes,
-    ensure_service_is_supported, patch_ingress_status,
+    ensure_service_is_supported, node_ip_type, patch_ingress_status,
 };
-use super::node_ip_type;
 use crate::lb::LoadBalancer;
 use crate::{
     CurrentContext,
