@@ -262,6 +262,32 @@ mod redaction_tests {
     }
 
     #[test]
+    fn hetzner_response_describes_status_code_and_message() {
+        use hcloud::apis::{Error, ResponseContent, load_balancers_api::ListLoadBalancersError};
+
+        let error = Error::<ListLoadBalancersError>::ResponseError(ResponseContent {
+            status: 503_u16.try_into().unwrap(),
+            content: r#"{"error":{"code":"robot_unavailable","message":"back end busy"}}"#.to_string(),
+            entity: None,
+        });
+        let description = super::describe_hcloud(&error);
+        assert!(description.contains("503"), "{description}");
+        assert!(description.contains("robot_unavailable"), "{description}");
+        assert!(description.contains("back end busy"), "{description}");
+    }
+
+    #[test]
+    fn malformed_hetzner_response_falls_back_to_http_status() {
+        use hcloud::apis::{Error, ResponseContent, load_balancers_api::ListLoadBalancersError};
+        let error = Error::<ListLoadBalancersError>::ResponseError(ResponseContent {
+            status: 502_u16.try_into().unwrap(),
+            content: "<html>bad gateway</html>".to_string(),
+            entity: None,
+        });
+        assert!(super::describe_hcloud(&error).contains("502"));
+    }
+
+    #[test]
     fn redacts_non_ascii_surrounding_text() {
         assert_eq!(
             redact(&format!("échec {} 🦀", &TOKEN[..8]), TOKEN),
