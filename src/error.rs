@@ -155,6 +155,7 @@ impl RobotLBError {
             Self::HcloudLBChangeAlgorithm(e) => is_transient_hcloud(e),
             Self::HCloudLBAttachToNetworkError(e) => is_transient_hcloud(e),
             Self::HcloudLBDetachFromNetworkError(e) => is_transient_hcloud(e),
+            Self::HcloudLBDeleteError(e) => is_transient_hcloud(e),
             _ => false,
         }
     }
