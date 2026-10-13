@@ -1,8 +1,25 @@
 //! Explicit Service reconciliation lifecycle and kube-rs scheduling policy.
 
-use super::*;
 use super::events::publish_reconciliation_warning;
-use crate::memo;
+use super::{
+    apply_desired_state, build_ingress, derive_services, derive_targets, discover_target_nodes,
+    ensure_service_is_supported, patch_ingress_status,
+};
+use crate::{
+    CurrentContext,
+    error::{RobotLBError, RobotLBResult},
+    finalizers, memo,
+    metrics::ReconcileTimer,
+};
+use k8s_openapi::api::core::v1::Service;
+use kube::{
+    Resource, ResourceExt,
+    runtime::controller::Action,
+};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 use crate::lb::DesiredLoadBalancer;
 
 /// Whether reconciliation completed or intentionally deferred without applying state.
@@ -24,7 +41,10 @@ pub(super) enum PendingReason {
 
 impl ReconcileOutcome {
     const fn was_successful(&self) -> bool {
-        matches!(self, Self::Synced(_) | Self::Unchanged(_) | Self::Deleted(_))
+        matches!(
+            self,
+            Self::Synced(_) | Self::Unchanged(_) | Self::Deleted(_)
+        )
     }
 
     fn into_action(self) -> Action {
@@ -44,7 +64,10 @@ const INGRESS_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(180);
 pub(super) const fn should_reset_failure_backoff(result: &RobotLBResult<ReconcileOutcome>) -> bool {
     matches!(
         result,
-        Ok(ReconcileOutcome::Synced(_) | ReconcileOutcome::Unchanged(_) | ReconcileOutcome::Deleted(_)) | Err(RobotLBError::SkipService)
+        Ok(ReconcileOutcome::Synced(_)
+            | ReconcileOutcome::Unchanged(_)
+            | ReconcileOutcome::Deleted(_))
+            | Err(RobotLBError::SkipService)
     )
 }
 
@@ -64,9 +87,10 @@ pub(super) async fn reconcile_service(
 ) -> RobotLBResult<Action> {
     let mut timer = ReconcileTimer::new(context.metrics.clone());
     let result = reconcile_service_inner(svc.clone(), context.clone()).await;
-    context
-        .memo
-        .settle(&svc, result.as_ref().is_ok_and(ReconcileOutcome::was_successful));
+    context.memo.settle(
+        &svc,
+        result.as_ref().is_ok_and(ReconcileOutcome::was_successful),
+    );
     if should_reset_failure_backoff(&result) {
         context.error_backoff.forget(&service_key(&svc));
     }
@@ -112,7 +136,10 @@ async fn reconcile_service_inner(
             ?delay,
             "Hetzner API rate limit pause; skipping reconciliation"
         );
-        return Ok(ReconcileOutcome::Deferred(PendingReason::RateLimited, Action::requeue(delay)));
+        return Ok(ReconcileOutcome::Deferred(
+            PendingReason::RateLimited,
+            Action::requeue(delay),
+        ));
     }
 
     // Decide cleanup before trying to parse potentially invalid annotations.
@@ -212,9 +239,10 @@ async fn reconcile_load_balancer(
             service = %svc.name_any(),
             "Load balancer has no ingress address yet; retrying shortly"
         );
-        return Ok(ReconcileOutcome::Deferred(PendingReason::Provisioning, Action::requeue(
-            INGRESS_RETRY_INTERVAL,
-        )));
+        return Ok(ReconcileOutcome::Deferred(
+            PendingReason::Provisioning,
+            Action::requeue(INGRESS_RETRY_INTERVAL),
+        ));
     }
     patch_ingress_status(&svc, &context, ingress.clone()).await?;
     if let Some(uid) = uid.as_deref() {
@@ -242,7 +270,11 @@ pub(super) const fn should_retry_missing_ingress(
 
 /// Schedule failures independently, but pause the entire project on rate limits.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn on_error(svc: Arc<Service>, error: &RobotLBError, context: Arc<CurrentContext>) -> Action {
+pub(super) fn on_error(
+    svc: Arc<Service>,
+    error: &RobotLBError,
+    context: Arc<CurrentContext>,
+) -> Action {
     error_action(
         error,
         &context.rate_limit,
@@ -274,7 +306,6 @@ pub(super) fn error_action(
         _ => Action::requeue(backoff.on_failure(service, now)),
     }
 }
-
 
 #[cfg(test)]
 mod policy_tests {
