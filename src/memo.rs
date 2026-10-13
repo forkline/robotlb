@@ -9,9 +9,16 @@ use std::{
 
 /// What each service looked like after its last successful reconcile, so that a
 /// watch event that changed nothing robotlb acts on costs no Hetzner requests.
+#[derive(Clone)]
+struct SuccessfulReconcile {
+    fingerprint: u64,
+    until: Instant,
+    ingress: Vec<LoadBalancerIngress>,
+}
+
 #[derive(Default)]
 pub struct ReconcileMemo {
-    entries: Mutex<HashMap<String, (u64, Instant, Vec<LoadBalancerIngress>)>>,
+    entries: Mutex<HashMap<String, SuccessfulReconcile>>,
     pending_ingress: Mutex<HashMap<String, (u64, Instant)>>,
 }
 
@@ -23,17 +30,17 @@ impl ReconcileMemo {
         fingerprint: u64,
         now: Instant,
     ) -> Option<(Duration, Vec<LoadBalancerIngress>)> {
-        let (recorded, until, ingress) = self
+        let snapshot = self
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(uid)?
             .clone();
-        if recorded != fingerprint {
+        if snapshot.fingerprint != fingerprint {
             return None;
         }
-        let left = until.saturating_duration_since(now);
-        (!left.is_zero()).then_some((left, ingress))
+        let left = snapshot.until.saturating_duration_since(now);
+        (!left.is_zero()).then_some((left, snapshot.ingress))
     }
 
     /// Keep the successful desired state and ingress status for `valid_for`.
@@ -48,7 +55,14 @@ impl ReconcileMemo {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(uid.to_string(), (fingerprint, now + valid_for, ingress));
+            .insert(
+                uid.to_string(),
+                SuccessfulReconcile {
+                    fingerprint,
+                    until: now + valid_for,
+                    ingress,
+                },
+            );
     }
 
     /// An incomplete ingress is normal briefly; escalate only after the deadline.
@@ -68,7 +82,9 @@ impl ReconcileMemo {
         if entry.0 != fingerprint {
             *entry = (fingerprint, now);
         }
-        now.saturating_duration_since(entry.1) >= deadline
+        let overdue = now.saturating_duration_since(entry.1) >= deadline;
+        drop(pending);
+        overdue
     }
 
     pub fn clear_pending(&self, uid: &str) {
@@ -236,10 +252,7 @@ mod tests {
             ..Default::default()
         }];
         memo.record("uid-1", 7, start, RESYNC, ingress.clone());
-        assert_eq!(
-            memo.unchanged("uid-1", 7, start),
-            Some((RESYNC, ingress))
-        );
+        assert_eq!(memo.unchanged("uid-1", 7, start), Some((RESYNC, ingress)));
     }
 
     #[test]
@@ -280,7 +293,10 @@ mod tests {
         let start = Instant::now();
         memo.record("uid-1", 7, start, RESYNC, vec![]);
         memo.record("uid-1", 8, start + RESYNC, RESYNC, vec![]);
-        assert_eq!(memo.unchanged("uid-1", 8, start + RESYNC), Some((RESYNC, vec![])));
+        assert_eq!(
+            memo.unchanged("uid-1", 8, start + RESYNC),
+            Some((RESYNC, vec![]))
+        );
     }
 
     fn settled(svc: &Service, succeeded: bool) -> bool {
