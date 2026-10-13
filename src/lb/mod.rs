@@ -531,21 +531,29 @@ impl LoadBalancer {
     ) -> RobotLBResult<()> {
         let max_targets = usize::try_from(lb_type.max_targets).map_err(|_| {
             RobotLBError::InvalidLoadBalancerConfiguration(format!(
-                "Invalid target capacity reported for LB type {}", lb_type.name
+                "Invalid target capacity reported for LB type {}",
+                lb_type.name
             ))
         })?;
         let max_services = usize::try_from(lb_type.max_services).map_err(|_| {
             RobotLBError::InvalidLoadBalancerConfiguration(format!(
-                "Invalid listener capacity reported for LB type {}", lb_type.name
+                "Invalid listener capacity reported for LB type {}",
+                lb_type.name
             ))
         })?;
         if max_targets == 0 || max_services == 0 {
             return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
-                "LB type {} has unavailable capacity limits", lb_type.name
+                "LB type {} has unavailable capacity limits",
+                lb_type.name
             )));
         }
 
-        let targets = self.targets.iter().map(|ip| normalize_ip(ip)).collect::<HashSet<_>>().len();
+        let targets = self
+            .targets
+            .iter()
+            .map(|ip| normalize_ip(ip))
+            .collect::<HashSet<_>>()
+            .len();
         let listeners = self.services.len();
         if targets > max_targets || listeners > max_services {
             return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
@@ -561,7 +569,10 @@ impl LoadBalancer {
         {
             return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
                 "Cannot change existing LB {} to {}: it currently has {} targets and {} listeners, exceeding the requested type's capacity ({max_targets} targets, {max_services} listeners); no changes applied",
-                existing.name, lb_type.name, existing.targets.len(), existing.services.len()
+                existing.name,
+                lb_type.name,
+                existing.targets.len(),
+                existing.services.len()
             )));
         }
         Ok(())
@@ -662,7 +673,6 @@ where
     }
     unreachable!("all retry paths return on the final attempt")
 }
-
 
 #[cfg(test)]
 mod tests {
