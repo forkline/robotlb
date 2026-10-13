@@ -37,6 +37,13 @@ pub use config::parse_cluster_name;
 pub(crate) use config::parse_load_balancer_config;
 use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service_matches_desired};
 
+/// Hetzner may accept a resize before it becomes visible. Do not plan target
+/// updates against the old target limit in that intermediate state.
+pub(crate) enum LoadBalancerReconcile {
+    Reconciled(Box<hcloud::models::LoadBalancer>),
+    TypeChangePending,
+}
+
 /// Struct representing a load balancer.
 ///
 /// It holds all the necessary information to manage the load balancer
@@ -117,19 +124,24 @@ impl LoadBalancer {
     ///
     /// Returns an error if the Hetzner Cloud API call fails.
     #[tracing::instrument(skip(self), fields(lb_name = self.name))]
-    pub async fn reconcile(&self) -> RobotLBResult<hcloud::models::LoadBalancer> {
+    pub async fn reconcile(&self) -> RobotLBResult<LoadBalancerReconcile> {
         let api = LiveHcloudLoadBalancerApi {
             hcloud_config: self.hcloud_config.clone(),
         };
         let hcloud_balancer = self.get_or_create_hcloud_lb().await?;
-        // Type changes are the highest-risk mutation; reject them before
-        // modifying the algorithm, network, listeners or targets.
-        self.reconcile_lb_type(&hcloud_balancer, &api).await?;
+        // A successful resize request starts an asynchronous Hetzner action.
+        // The old LoadBalancerType metadata is no longer a safe capacity bound
+        // for the subsequent target plan, particularly on upgrades/downgrades.
+        // Keep the current targets in place until the desired type is observed.
+        if self.plan_lb_type_action(&hcloud_balancer).is_some() {
+            self.reconcile_lb_type(&hcloud_balancer, &api).await?;
+            return Ok(LoadBalancerReconcile::TypeChangePending);
+        }
         self.reconcile_algorithm(&hcloud_balancer, &api).await?;
         self.reconcile_network(&hcloud_balancer).await?;
         self.reconcile_services(&hcloud_balancer, &api).await?;
         self.reconcile_targets(&hcloud_balancer, &api).await?;
-        Ok(hcloud_balancer)
+        Ok(LoadBalancerReconcile::Reconciled(Box::new(hcloud_balancer)))
     }
 
     /// Reconcile the services of the load balancer.
@@ -226,7 +238,24 @@ impl LoadBalancer {
         hcloud_balancer: &hcloud::models::LoadBalancer,
         api: &impl HcloudLoadBalancerApi,
     ) -> RobotLBResult<()> {
-        for action in self.plan_target_actions(hcloud_balancer) {
+        // Capacity may be omitted from a Load Balancer response even though it
+        // is available from the type catalog. Only pay for a lookup when needed.
+        let capacity = if hcloud_balancer.load_balancer_type.max_targets > 0 {
+            usize::try_from(hcloud_balancer.load_balancer_type.max_targets).map_err(|_| {
+                RobotLBError::InvalidLoadBalancerConfiguration(
+                    "Hetzner returned an invalid target limit".to_string(),
+                )
+            })?
+        } else {
+            let lb_type =
+                api::get_load_balancer_type(&self.hcloud_config, &self.balancer_type).await?;
+            usize::try_from(lb_type.max_targets).map_err(|_| {
+                RobotLBError::InvalidLoadBalancerConfiguration(
+                    "Hetzner returned an invalid target limit".to_string(),
+                )
+            })?
+        };
+        for action in self.plan_target_actions(hcloud_balancer, capacity)? {
             match action {
                 TargetReconcileAction::Remove { target_ip } => {
                     tracing::info!("Removing target {}", target_ip);
@@ -343,60 +372,53 @@ impl LoadBalancer {
     fn plan_target_actions(
         &self,
         hcloud_balancer: &hcloud::models::LoadBalancer,
-    ) -> Vec<TargetReconcileAction> {
-        // Keep target actions deterministic and avoid removing working backends
-        // before replacements are ready whenever the LB has spare capacity.
-        let desired_targets: HashSet<String> =
-            self.targets.iter().map(|ip| normalize_ip(ip)).collect();
-        let current_targets: HashSet<String> = hcloud_balancer
+        capacity: usize,
+    ) -> RobotLBResult<Vec<TargetReconcileAction>> {
+        // Plan against the observed provider occupancy, including non-IP
+        // targets that robotlb cannot safely modify.
+        let desired: HashSet<String> = self.targets.iter().map(|ip| normalize_ip(ip)).collect();
+        let existing: HashSet<String> = hcloud_balancer
             .targets
             .iter()
-            .filter_map(|target| {
-                target
-                    .ip
-                    .as_ref()
-                    .map(|target_ip| normalize_ip(&target_ip.ip))
-            })
+            .filter_map(|target| target.ip.as_ref().map(|ip| normalize_ip(&ip.ip)))
             .collect();
+
+        let mut to_add: Vec<_> = desired.difference(&existing).cloned().collect();
+        to_add.sort();
 
         let mut to_remove: Vec<String> = hcloud_balancer
             .targets
             .iter()
             .filter_map(|target| target.ip.as_ref())
-            .filter(|target| !desired_targets.contains(&normalize_ip(&target.ip)))
+            .filter(|target| !desired.contains(&normalize_ip(&target.ip)))
             .map(|target| target.ip.clone())
             .collect();
         to_remove.sort();
         to_remove.dedup();
 
-        let mut to_add: Vec<String> = desired_targets
-            .difference(&current_targets)
-            .cloned()
-            .collect();
-        to_add.sort();
-
-        // Count *all* provider targets for capacity, not just those with an IP.
-        // Unknown/zero capacity conservatively falls back to replacement order.
-        let capacity = usize::try_from(hcloud_balancer.load_balancer_type.max_targets).unwrap_or(0);
-        let spare = capacity.saturating_sub(hcloud_balancer.targets.len());
-
-        let mut actions = Vec::with_capacity(to_add.len() + to_remove.len());
-        let mut additions = to_add.into_iter();
-        for ip in additions.by_ref().take(spare) {
-            actions.push(TargetReconcileAction::Add { target_ip: ip });
-        }
-
+        let mut occupied = hcloud_balancer.targets.len();
         let mut removals = to_remove.into_iter();
-        // At capacity, replace targets one at a time rather than first
-        // removing every stale target, which could cut off all backends.
-        for ip in additions {
-            if let Some(stale) = removals.next() {
+        let mut actions = Vec::with_capacity(to_add.len() + removals.len());
+
+        // Add first if a slot is free. At capacity, release one obsolete IP
+        // before its replacement. If additional slots cannot be freed without
+        // deleting an unmanaged/non-IP target, fail before any API mutation.
+        for ip in to_add {
+            while occupied >= capacity {
+                let Some(stale) = removals.next() else {
+                    return Err(RobotLBError::InvalidLoadBalancerConfiguration(format!(
+                        "Cannot add load balancer target {ip}: {occupied} of {capacity} target slots occupied; no removable outdated IP targets remain",
+                    )));
+                };
                 actions.push(TargetReconcileAction::Remove { target_ip: stale });
+                occupied -= 1;
             }
             actions.push(TargetReconcileAction::Add { target_ip: ip });
+            occupied += 1;
         }
+
         actions.extend(removals.map(|target_ip| TargetReconcileAction::Remove { target_ip }));
-        actions
+        Ok(actions)
     }
 
     fn plan_algorithm_action(
@@ -1133,7 +1155,7 @@ mod tests {
 
         let remote = remote_balancer_with_services(vec![], vec!["10.0.0.2", "10.0.0.3"]);
 
-        let plan = lb.plan_target_actions(&remote);
+        let plan = lb.plan_target_actions(&remote, 25).unwrap();
 
         assert_eq!(
             plan,
@@ -1155,7 +1177,7 @@ mod tests {
         remote.load_balancer_type.max_targets = 2;
 
         assert_eq!(
-            lb.plan_target_actions(&remote),
+            lb.plan_target_actions(&remote, 2).unwrap(),
             vec![
                 TargetReconcileAction::Remove {
                     target_ip: "10.0.0.3".into()
@@ -1174,11 +1196,48 @@ mod tests {
     }
 
     #[test]
+    fn capacity_is_checked_before_any_target_requests() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into()];
+        // An unmanaged, non-IP target consumes the only slot and cannot be
+        // silently removed to make room for our desired target.
+        let remote = hcloud::models::LoadBalancer {
+            targets: vec![hcloud::models::LoadBalancerTarget {
+                server: Some(Box::new(hcloud::models::ResourceId { id: 41 })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = lb.plan_target_actions(&remote, 1).unwrap_err();
+        assert!(matches!(err, RobotLBError::InvalidLoadBalancerConfiguration(_)));
+    }
+
+    #[test]
+    fn capacity_plan_accounts_for_existing_unmanaged_targets() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
+        let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
+        remote.targets.push(hcloud::models::LoadBalancerTarget {
+            ..Default::default()
+        });
+
+        assert_eq!(
+            lb.plan_target_actions(&remote, 3).unwrap(),
+            vec![
+                TargetReconcileAction::Remove { target_ip: "10.0.0.3".into() },
+                TargetReconcileAction::Add { target_ip: "10.0.0.1".into() },
+                TargetReconcileAction::Remove { target_ip: "10.0.0.4".into() },
+                TargetReconcileAction::Add { target_ip: "10.0.0.2".into() },
+            ],
+        );
+    }
+
+    #[test]
     fn spare_capacity_preserves_old_backends_until_additions() {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
         let remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
-        let actions = lb.plan_target_actions(&remote);
+        let actions = lb.plan_target_actions(&remote, 25).unwrap();
         assert_eq!(
             actions,
             vec![
