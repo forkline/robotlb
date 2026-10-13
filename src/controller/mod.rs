@@ -161,7 +161,7 @@ async fn publish_invalid_configuration_warning(
         note: Some(error.to_string()),
         secondary: None,
     };
-    if let Err(publish_error) = recorder.publish(&event, &svc.object_ref()).await {
+    if let Err(publish_error) = recorder.publish(&event, &svc.object_ref(&())).await {
         tracing::warn!(
             error = %publish_error,
             "Cannot publish invalid configuration Warning Event"
