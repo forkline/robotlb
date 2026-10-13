@@ -37,6 +37,7 @@ pub(super) enum PendingReason {
     Provisioning,
     TypeChange,
     TargetChange,
+    LegacyMigration,
 }
 
 impl ReconcileOutcome {
@@ -217,6 +218,14 @@ async fn reconcile_load_balancer(
 
     let (hcloud_lb, targets_pending) = match lb.reconcile().await? {
         LoadBalancerReconcile::Reconciled(lb) => (lb, false),
+        LoadBalancerReconcile::LegacyMigrationPending => {
+            // Wait for the replacement to disappear before adopting the old LB.
+            // No new LB may be provisioned during this transition.
+            return Ok(ReconcileOutcome::Deferred(
+                PendingReason::LegacyMigration,
+                Action::requeue(Duration::from_secs(5)),
+            ));
+        }
         LoadBalancerReconcile::TypeChangePending => {
             // The resize Action finished; read the new provider capacity on
             // the next pass before touching any targets.
@@ -384,6 +393,7 @@ mod policy_tests {
             PendingReason::Provisioning,
             PendingReason::TypeChange,
             PendingReason::TargetChange,
+            PendingReason::LegacyMigration,
         ] {
             let pending =
                 ReconcileOutcome::Deferred(reason, Action::requeue(Duration::from_secs(15)));
