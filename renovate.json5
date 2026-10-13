@@ -5,6 +5,13 @@
   ],
   forkProcessing: 'enabled',
   configMigration: true,
+  // Direct crate updates already run; this also refreshes transitive Cargo.lock
+  // dependencies (including security fixes) that do not change Cargo.toml.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ['on monday'],
+    automerge: false,
+  },
   'pre-commit': {
     enabled: true,
     commitMessagePrefix: 'pre-commit: ',
