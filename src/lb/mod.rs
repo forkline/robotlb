@@ -779,6 +779,7 @@ mod tests {
     #[derive(Default)]
     struct MockHcloudApi {
         calls: Mutex<Vec<ApiCall>>,
+        fail_next_add_target: std::sync::atomic::AtomicBool,
     }
 
     impl MockHcloudApi {
@@ -853,6 +854,12 @@ mod tests {
                 .lock()
                 .expect("lock should not be poisoned")
                 .push(ApiCall::AddTarget { ip: target_ip });
+            if self
+                .fail_next_add_target
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(RobotLBError::HCloudError("injected target failure".into()));
+            }
             Ok(())
         }
 
@@ -1005,6 +1012,43 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_partial_target_update_retries_from_fresh_observed_state() {
+        let mut lb = test_load_balancer();
+        lb.targets = vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()];
+        let before = remote_balancer_with_services(vec![], vec!["10.0.0.2", "10.0.0.3"]);
+        let api = MockHcloudApi {
+            fail_next_add_target: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+
+        // The stale target is removed; adding the replacement fails.
+        assert!(lb.reconcile_targets(&before, &api).await.is_err());
+        assert_eq!(
+            api.calls(),
+            vec![
+                ApiCall::RemoveTarget {
+                    ip: "10.0.0.3".into()
+                },
+                ApiCall::AddTarget {
+                    ip: "10.0.0.1".into()
+                },
+            ],
+        );
+
+        // Re-observe Hetzner after the partial change: only the missing
+        // target is added, rather than replaying the successful removal.
+        let after_removal = remote_balancer_with_services(vec![], vec!["10.0.0.2"]);
+        lb.reconcile_targets(&after_removal, &api).await.unwrap();
+        assert_eq!(
+            api.calls().last(),
+            Some(&ApiCall::AddTarget {
+                ip: "10.0.0.1".into()
+            }),
+        );
+        assert_eq!(api.calls().len(), 3);
     }
 
     #[tokio::test]

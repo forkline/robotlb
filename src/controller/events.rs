@@ -86,3 +86,37 @@ pub(super) fn event_note(error: &RobotLBError, token: &str) -> String {
     }
     note
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_reasons_are_stable_and_distinguishable() {
+        assert_eq!(
+            warning_reason(&RobotLBError::InvalidLoadBalancerConfiguration(
+                "too many targets".into(),
+            )),
+            "InvalidLoadBalancerConfiguration",
+        );
+        assert_eq!(
+            warning_reason(&RobotLBError::LoadBalancerProvisioningTimeout),
+            "LoadBalancerProvisioningTimeout",
+        );
+        assert_eq!(
+            warning_reason(&RobotLBError::HCloudError("provider down".into())),
+            "SyncLoadBalancerFailed",
+        );
+    }
+
+    #[test]
+    fn event_notes_are_redacted_and_utf8_safe() {
+        let token = "abcdef0123456789abcdef0123456789";
+        let message = format!("token {} {}", &token[..12], "é".repeat(700));
+        let note = event_note(&RobotLBError::HCloudError(message), token);
+        assert!(note.contains("[REDACTED]"));
+        assert!(!note.contains(&token[..12]));
+        assert!(note.len() <= 1024);
+        assert!(note.is_char_boundary(note.len()));
+    }
+}
