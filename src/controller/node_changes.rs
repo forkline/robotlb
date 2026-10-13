@@ -1,5 +1,5 @@
 //! Detect node changes that actually affect Hetzner target selection.
-//! Kubelet heartbeats must not trigger reconciling every LoadBalancer Service.
+//! Kubelet heartbeats must not trigger reconciling every `LoadBalancer` Service.
 
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
