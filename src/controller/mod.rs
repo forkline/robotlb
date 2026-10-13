@@ -373,8 +373,8 @@ pub fn map_endpoint_slice_to_service(
     Some(ObjectRef::new(&service_name).within(&namespace))
 }
 
-/// Whether an EndpointSlice change can move the nodes selected by a Service.
-/// Preserve Pod-based Local discovery rather than switching to EndpointSlice readiness.
+/// Whether an `EndpointSlice` change can move the nodes selected by a Service.
+/// Preserve Pod-based Local discovery rather than switching to `EndpointSlice` readiness.
 fn slice_target_mode(svc: &Service, dynamic_node_selector: bool) -> Option<SliceTargetMode> {
     if !dynamic_node_selector || ensure_service_is_supported(svc).is_err() {
         return None;
@@ -383,15 +383,21 @@ fn slice_target_mode(svc: &Service, dynamic_node_selector: bool) -> Option<Slice
     if spec.external_traffic_policy.as_deref() != Some("Local") {
         return None;
     }
-    Some(if spec.selector.as_ref().is_some_and(|selector| !selector.is_empty()) {
-        SliceTargetMode::PodNodes
-    } else {
-        SliceTargetMode::ReadyEndpointNodes
-    })
+    Some(
+        if spec
+            .selector
+            .as_ref()
+            .is_some_and(|selector| !selector.is_empty())
+        {
+            SliceTargetMode::PodNodes
+        } else {
+            SliceTargetMode::ReadyEndpointNodes
+        },
+    )
 }
 
 /// Wake all Services only when target-relevant Nodes change or an observed
-/// EndpointSlice is removed. Ordinary EndpointSlice changes use the targeted mapper.
+/// `EndpointSlice` is removed. Ordinary `EndpointSlice` changes use the targeted mapper.
 fn node_change_signals(
     client: kube::Client,
     slice_changes: Arc<SliceChanges>,
@@ -461,59 +467,61 @@ pub async fn run(
     let slice_changes = Arc::new(SliceChanges::default());
     let dynamic_node_selector = context.config.dynamic_node_selector;
     controller
-    .reconcile_all_on(node_change_signals(
-        context.client.clone(),
-        slice_changes.clone(),
-    ))
-    .watches(
-        kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(context.client.clone()),
-        watcher::Config::default(),
-        move |endpoint_slice| {
-            let service_ref = map_endpoint_slice_to_service(&endpoint_slice)?;
-            let service = services.get(&service_ref)?;
-            match slice_target_mode(&service, dynamic_node_selector) {
-                Some(mode) if slice_changes.observe(&endpoint_slice, mode) => Some(service_ref),
-                Some(_) => None,
-                None => {
-                    slice_changes.forget(&endpoint_slice);
-                    None
+        .reconcile_all_on(node_change_signals(
+            context.client.clone(),
+            slice_changes.clone(),
+        ))
+        .watches(
+            kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(
+                context.client.clone(),
+            ),
+            watcher::Config::default(),
+            move |endpoint_slice| {
+                let service_ref = map_endpoint_slice_to_service(&endpoint_slice)?;
+                let service = services.get(&service_ref)?;
+                match slice_target_mode(&service, dynamic_node_selector) {
+                    Some(mode) if slice_changes.observe(&endpoint_slice, mode) => Some(service_ref),
+                    Some(_) => None,
+                    None => {
+                        slice_changes.forget(&endpoint_slice);
+                        None
+                    }
+                }
+            },
+        )
+        .run(reconcile_service, on_error, context)
+        .take_until(controller_shutdown.cancelled())
+        .for_each(|reconciliation_result| {
+            let token = hcloud_token.clone();
+            async move {
+                match reconciliation_result {
+                    Ok((service, _action)) => {
+                        tracing::info!(
+                            "Reconciliation of a service {} was successful",
+                            service.name
+                        );
+                    }
+                    Err(kube::runtime::controller::Error::ReconcilerFailed(
+                        RobotLBError::SkipService,
+                        _,
+                    )) => {}
+                    Err(kube::runtime::controller::Error::ReconcilerFailed(error, service)) => {
+                        tracing::error!(
+                            service = %service,
+                            error = %crate::error::redact(&error.to_string(), &token),
+                            "Service reconciliation failed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            error = %crate::error::redact(&error.to_string(), &token),
+                            "Controller reconciliation failed"
+                        );
+                    }
                 }
             }
-        },
-    )
-    .run(reconcile_service, on_error, context)
-    .take_until(controller_shutdown.cancelled())
-    .for_each(|reconciliation_result| {
-        let token = hcloud_token.clone();
-        async move {
-            match reconciliation_result {
-                Ok((service, _action)) => {
-                    tracing::info!(
-                        "Reconciliation of a service {} was successful",
-                        service.name
-                    );
-                }
-                Err(kube::runtime::controller::Error::ReconcilerFailed(
-                    RobotLBError::SkipService,
-                    _,
-                )) => {}
-                Err(kube::runtime::controller::Error::ReconcilerFailed(error, service)) => {
-                    tracing::error!(
-                        service = %service,
-                        error = %crate::error::redact(&error.to_string(), &token),
-                        "Service reconciliation failed"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        error = %crate::error::redact(&error.to_string(), &token),
-                        "Controller reconciliation failed"
-                    );
-                }
-            }
-        }
-    })
-    .await;
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -625,9 +633,7 @@ mod tests {
             slice_target_mode(&svc, true),
             Some(SliceTargetMode::ReadyEndpointNodes)
         );
-        svc.spec.as_mut().unwrap().selector = Some(
-            [("app".to_string(), "web".to_string())].into(),
-        );
+        svc.spec.as_mut().unwrap().selector = Some([("app".to_string(), "web".to_string())].into());
         assert_eq!(
             slice_target_mode(&svc, true),
             Some(SliceTargetMode::PodNodes)
