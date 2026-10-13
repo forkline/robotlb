@@ -39,7 +39,7 @@ use types::{ServiceReconcileAction, TargetReconcileAction, normalize_ip, service
 
 /// Hetzner may accept a resize before it becomes visible. Do not plan target
 /// updates against the old target limit in that intermediate state.
-pub(crate) enum LoadBalancerReconcile {
+pub enum LoadBalancerReconcile {
     Reconciled(Box<hcloud::models::LoadBalancer>),
     TypeChangePending,
 }
@@ -1209,7 +1209,10 @@ mod tests {
             ..Default::default()
         };
         let err = lb.plan_target_actions(&remote, 1).unwrap_err();
-        assert!(matches!(err, RobotLBError::InvalidLoadBalancerConfiguration(_)));
+        assert!(matches!(
+            err,
+            RobotLBError::InvalidLoadBalancerConfiguration(_)
+        ));
     }
 
     #[test]
@@ -1217,17 +1220,23 @@ mod tests {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into(), "10.0.0.2".into()];
         let mut remote = remote_balancer_with_services(vec![], vec!["10.0.0.3", "10.0.0.4"]);
-        remote.targets.push(hcloud::models::LoadBalancerTarget {
-            ..Default::default()
-        });
+        remote.targets.push(hcloud::models::LoadBalancerTarget::default());
 
         assert_eq!(
             lb.plan_target_actions(&remote, 3).unwrap(),
             vec![
-                TargetReconcileAction::Remove { target_ip: "10.0.0.3".into() },
-                TargetReconcileAction::Add { target_ip: "10.0.0.1".into() },
-                TargetReconcileAction::Remove { target_ip: "10.0.0.4".into() },
-                TargetReconcileAction::Add { target_ip: "10.0.0.2".into() },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.3".into()
+                },
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.1".into()
+                },
+                TargetReconcileAction::Remove {
+                    target_ip: "10.0.0.4".into()
+                },
+                TargetReconcileAction::Add {
+                    target_ip: "10.0.0.2".into()
+                },
             ],
         );
     }
