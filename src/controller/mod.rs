@@ -160,7 +160,9 @@ fn node_change_signals(
     tokio::spawn(async move {
         let mut events = std::pin::pin!(
             watcher::watcher(
-                kube::Api::<kube::core::PartialObjectMeta<k8s_openapi::api::discovery::v1::EndpointSlice>>::all(client),
+                kube::Api::<
+                    kube::core::PartialObjectMeta<k8s_openapi::api::discovery::v1::EndpointSlice>,
+                >::all(client),
                 watcher::Config::default(),
             )
             .default_backoff()
