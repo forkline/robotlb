@@ -159,8 +159,8 @@ fn node_change_signals(
     // events (and deletions during relists) cannot leave stale target nodes.
     tokio::spawn(async move {
         let mut events = std::pin::pin!(
-            watcher::metadata_watcher(
-                kube::Api::<k8s_openapi::api::discovery::v1::EndpointSlice>::all(client),
+            watcher::watcher(
+                kube::Api::<kube::core::PartialObjectMeta<k8s_openapi::api::discovery::v1::EndpointSlice>>::all(client),
                 watcher::Config::default(),
             )
             .default_backoff()
