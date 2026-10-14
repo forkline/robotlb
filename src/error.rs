@@ -172,7 +172,7 @@ pub enum RobotLBError {
 
 impl RobotLBError {
     /// Whether Hetzner rejected an operation due to the project-wide request quota.
-    pub fn is_rate_limited(&self) -> bool {
+    pub const fn is_rate_limited(&self) -> bool {
         match self {
             Self::HCloudLBAttachToNetworkError(e) => is_rate_limit(e),
             Self::HcloudLBDetachFromNetworkError(e) => is_rate_limit(e),
