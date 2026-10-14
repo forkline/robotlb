@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4](https://github.com/forkline/robotlb/tree/0.7.4) - 2026-10-14
+
+### Fixed
+
+- renovate: Load forkProcessing from renovate.json (#77) ([59867c0](https://github.com/forkline/robotlb/commit/59867c02808d6a501f87b108db5ccaf6bfd1bcce))
+
+### Build
+
+- deps: Update Rust crate hyper to v1.12.0 (#85) ([db627dc](https://github.com/forkline/robotlb/commit/db627dcca6049ef81690c62d942c6e4d645205c2))
+- deps: Update Rust crate kube to v3.1.0 (#86) ([883a477](https://github.com/forkline/robotlb/commit/883a477ea46c33508a3f2aac092195038a3f8201))
+- deps: Update Rust crate clap to v4.6.7 (#84) ([48efe68](https://github.com/forkline/robotlb/commit/48efe68a816159cd59da1ab7d3d6b4987ede95bf))
+- deps: Update rust Docker tag to v1.99.0 (#88) ([3c27cdf](https://github.com/forkline/robotlb/commit/3c27cdf53ee47a2456e096f4c6a276dc07929c47))
+- deps: Update Rust crate http-body-util to v0.1.5 (#80) ([9fcf6d7](https://github.com/forkline/robotlb/commit/9fcf6d7edb8ec4dce827e38218b1ecfecd4262ac))
+- deps: Update Rust crate tokio to v1.53.3 (#87) ([2440419](https://github.com/forkline/robotlb/commit/2440419a62f84b0de6b7dab25ef0f09c765290bf))
+- deps: Update Rust crate tokio-util to v0.7.20 (#81) ([bf19f59](https://github.com/forkline/robotlb/commit/bf19f5905d5378b26e209ab8bd6b899e8b60de28))
+- deps: Update Rust crate tracing-subscriber to v0.3.23 (#82) ([b214490](https://github.com/forkline/robotlb/commit/b214490f98ba6a38e242e6e2ec8c93fa4506c2fa))
+- deps: Update opentelemetry (#83) ([aebf922](https://github.com/forkline/robotlb/commit/aebf922e6633115c28fb1a8a5e1215dcbc339cbb))
+- deps: Update azure/setup-helm action to v5 (#89) ([da5ea55](https://github.com/forkline/robotlb/commit/da5ea55497eecfc3a67ef5b2b050e73ae464f765))
+- deps: Update docker/build-push-action action to v7 (#90) ([8cee7bb](https://github.com/forkline/robotlb/commit/8cee7bb7f1f40157aebc3c925c3036977c96c466))
+- deps: Update docker/login-action action to v4 (#91) ([9521a6d](https://github.com/forkline/robotlb/commit/9521a6da4c51456197318da191af9201adbb1c58))
+- deps: Update docker/setup-buildx-action action to v4 (#92) ([c616c52](https://github.com/forkline/robotlb/commit/c616c52e161799964d9ad9dd5c059e620810cac7))
+- deps: Update docker/setup-qemu-action action to v4 (#93) ([2d4c6a9](https://github.com/forkline/robotlb/commit/2d4c6a92f603b7c60cb470b8c880aa606ea26069))
+
 ## [0.7.3](https://github.com/forkline/robotlb/tree/0.7.3) - 2026-10-13
 
 ### Added
