@@ -9,7 +9,7 @@ use thiserror::Error;
 /// Result type alias for robotlb operations.
 pub type RobotLBResult<T> = Result<T, RobotLBError>;
 
-fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
+const fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
     matches!(err, hcloud::apis::Error::ResponseError(response) if response.status.as_u16() == 429)
 }
 
@@ -172,7 +172,7 @@ pub enum RobotLBError {
 
 impl RobotLBError {
     /// Whether Hetzner rejected an operation due to the project-wide request quota.
-    pub fn is_rate_limited(&self) -> bool {
+    pub const fn is_rate_limited(&self) -> bool {
         match self {
             Self::HCloudLBAttachToNetworkError(e) => is_rate_limit(e),
             Self::HcloudLBDetachFromNetworkError(e) => is_rate_limit(e),
