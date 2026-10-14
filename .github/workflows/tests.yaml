@@ -6,7 +6,7 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
       - uses: actions-rs/toolchain@v1
         with:
@@ -20,7 +20,7 @@ jobs:
   docker-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build locked release image
         run: docker build --progress=plain -t robotlb:pr .
       - name: Verify runtime dependencies and CLI startup
@@ -33,7 +33,7 @@ jobs:
   helm-unittest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Helm unittest plugin
         run: helm plugin install https://github.com/helm-unittest/helm-unittest.git
       - name: Run Helm unittests
