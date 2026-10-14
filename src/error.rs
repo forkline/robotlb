@@ -9,7 +9,7 @@ use thiserror::Error;
 /// Result type alias for robotlb operations.
 pub type RobotLBResult<T> = Result<T, RobotLBError>;
 
-fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
+const fn is_rate_limit<E>(err: &hcloud::apis::Error<E>) -> bool {
     matches!(err, hcloud::apis::Error::ResponseError(response) if response.status.as_u16() == 429)
 }
 
