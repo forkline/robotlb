@@ -52,30 +52,59 @@
       ]
     },
     {
-      "matchUpdateTypes": [
-        "patch"
+      "description": "Automerge non-breaking stable Rust dependencies after CI and a short release soak",
+      "matchManagers": [
+        "cargo"
       ],
       "matchCurrentVersion": "!/^0/",
-      "automerge": true,
-      "automergeType": "pr",
-      "ignoreTests": false,
-      "platformAutomerge": true,
-      "matchPackageNames": [
-        "/.*/"
-      ]
-    },
-    {
       "matchUpdateTypes": [
+        "patch",
         "minor"
       ],
-      "matchCurrentVersion": "!/^0/",
       "automerge": true,
       "automergeType": "pr",
-      "ignoreTests": false,
       "platformAutomerge": true,
+      "ignoreTests": false,
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Automerge non-major GitHub Actions and pre-commit updates after CI",
+      "matchManagers": [
+        "github-actions",
+        "pre-commit"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "ignoreTests": false,
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Never automerge controller-critical dependencies, even when their version looks stable",
       "matchPackageNames": [
-        "/.*/"
-      ]
+        "kube",
+        "kube-core",
+        "kube-client",
+        "kube-runtime",
+        "kube-derive",
+        "k8s-openapi",
+        "kube-leader-election",
+        "hcloud",
+        "tower-http",
+        "tikv-jemallocator",
+        "hyper",
+        "hyper-util",
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "opentelemetry-semantic-conventions",
+        "tracing-opentelemetry"
+      ],
+      "automerge": false
     },
     {
       "matchPackageNames": [
