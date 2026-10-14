@@ -103,7 +103,7 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             &self.hcloud_config,
             UpdateServiceParams {
                 id: load_balancer_id,
-                body: service,
+                update_load_balancer_service: service,
             },
         )
         .await?;
@@ -131,7 +131,7 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             &self.hcloud_config,
             AddServiceParams {
                 id: load_balancer_id,
-                body: service,
+                load_balancer_service: service,
             },
         )
         .await?;
@@ -168,7 +168,7 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             &self.hcloud_config,
             AddTargetParams {
                 id: load_balancer_id,
-                body: LoadBalancerAddTarget {
+                load_balancer_add_target: LoadBalancerAddTarget {
                     ip: Some(Box::new(hcloud::models::LoadBalancerTargetIp {
                         ip: target_ip,
                     })),
