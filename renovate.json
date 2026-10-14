@@ -63,9 +63,9 @@
       ],
       "automerge": true,
       "automergeType": "pr",
-      "platformAutomerge": true,
+      "platformAutomerge": false,
       "ignoreTests": false,
-      "minimumReleaseAge": "3 days"
+      "minimumReleaseAge": "14 days"
     },
     {
       "description": "Automerge non-major GitHub Actions and pre-commit updates after CI",
@@ -79,9 +79,27 @@
       ],
       "automerge": true,
       "automergeType": "pr",
-      "platformAutomerge": true,
+      "platformAutomerge": false,
       "ignoreTests": false,
-      "minimumReleaseAge": "3 days"
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Automerge tested patch updates of futures 0.x only; other pre-1.0 crates are reviewed",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "futures"
+      ],
+      "matchCurrentVersion": "/^0\\./",
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false,
+      "minimumReleaseAge": "14 days"
     },
     {
       "description": "Never automerge controller-critical dependencies, even when their version looks stable",
@@ -102,8 +120,27 @@
         "opentelemetry_sdk",
         "opentelemetry-otlp",
         "opentelemetry-semantic-conventions",
-        "tracing-opentelemetry"
+        "tracing-opentelemetry",
+        "tokio",
+        "tokio-util",
+        "tracing",
+        "tracing-subscriber",
+        "/^kube-/"
       ],
+      "automerge": false
+    },
+    {
+      "description": "Update kube-rs dependencies as one manually reviewed compatibility group",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "kube",
+        "kube-leader-election",
+        "k8s-openapi"
+      ],
+      "groupName": "kubernetes-client",
+      "groupSlug": "kubernetes-client",
       "automerge": false
     },
     {
@@ -118,14 +155,11 @@
       "matchPackageNames": [
         "renovatebot/pre-commit-hooks"
       ],
-      "automerge": true,
-      "automergeType": "pr",
-      "ignoreTests": false,
-      "platformAutomerge": true,
       "schedule": [
         "after 4am and before 10am on the first day of the month"
       ],
-      "enabled": true
+      "enabled": true,
+      "description": "Keep pre-commit-hooks updates monthly; major versions remain manual"
     },
     {
       "matchDatasources": [
@@ -136,5 +170,9 @@
         "/debian/"
       ]
     }
-  ]
+  ],
+  "platformAutomerge": false,
+  "automergeStrategy": "squash",
+  "ignoreTests": false,
+  "dependencyDashboard": true
 }
