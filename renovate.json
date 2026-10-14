@@ -52,30 +52,96 @@
       ]
     },
     {
+      "description": "Automerge non-breaking stable Rust dependencies after CI and a short release soak",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchCurrentVersion": "!/^0/",
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false,
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Automerge non-major GitHub Actions and pre-commit updates after CI",
+      "matchManagers": [
+        "github-actions",
+        "pre-commit"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "ignoreTests": false,
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Automerge tested patch updates of futures 0.x only; other pre-1.0 crates are reviewed",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "futures"
+      ],
+      "matchCurrentVersion": "/^0\\./",
       "matchUpdateTypes": [
         "patch"
       ],
-      "matchCurrentVersion": "!/^0/",
       "automerge": true,
       "automergeType": "pr",
+      "platformAutomerge": false,
       "ignoreTests": false,
-      "platformAutomerge": true,
-      "matchPackageNames": [
-        "/.*/"
-      ]
+      "minimumReleaseAge": "14 days"
     },
     {
-      "matchUpdateTypes": [
-        "minor"
-      ],
-      "matchCurrentVersion": "!/^0/",
-      "automerge": true,
-      "automergeType": "pr",
-      "ignoreTests": false,
-      "platformAutomerge": true,
+      "description": "Never automerge controller-critical dependencies, even when their version looks stable",
       "matchPackageNames": [
-        "/.*/"
-      ]
+        "kube",
+        "kube-core",
+        "kube-client",
+        "kube-runtime",
+        "kube-derive",
+        "k8s-openapi",
+        "kube-leader-election",
+        "hcloud",
+        "tower-http",
+        "tikv-jemallocator",
+        "hyper",
+        "hyper-util",
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "opentelemetry-semantic-conventions",
+        "tracing-opentelemetry",
+        "tokio",
+        "tokio-util",
+        "tracing",
+        "tracing-subscriber",
+        "/^kube-/"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Update kube-rs dependencies as one manually reviewed compatibility group",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "kube",
+        "kube-leader-election",
+        "k8s-openapi"
+      ],
+      "groupName": "kubernetes-client",
+      "groupSlug": "kubernetes-client",
+      "automerge": false
     },
     {
       "matchPackageNames": [
@@ -89,14 +155,11 @@
       "matchPackageNames": [
         "renovatebot/pre-commit-hooks"
       ],
-      "automerge": true,
-      "automergeType": "pr",
-      "ignoreTests": false,
-      "platformAutomerge": true,
       "schedule": [
         "after 4am and before 10am on the first day of the month"
       ],
-      "enabled": true
+      "enabled": true,
+      "description": "Keep pre-commit-hooks updates monthly; major versions remain manual"
     },
     {
       "matchDatasources": [
@@ -107,5 +170,9 @@
         "/debian/"
       ]
     }
-  ]
+  ],
+  "platformAutomerge": false,
+  "automergeStrategy": "squash",
+  "ignoreTests": false,
+  "dependencyDashboard": true
 }
