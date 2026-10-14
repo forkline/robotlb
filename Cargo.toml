@@ -9,7 +9,7 @@ async-trait = "0.1.89"
 clap = { version = "4.5.21", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures = "0.3.31"
-hcloud = "0.25.0"
+hcloud = "0.26.0"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
