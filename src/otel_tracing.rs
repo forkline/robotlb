@@ -8,7 +8,7 @@ use opentelemetry::{global, trace::TracerProvider};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     Resource,
-    trace::{self, Sampler, SdkTracerProvider},
+    trace::{Sampler, SdkTracerProvider},
 };
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 pub struct TracingGuard {
@@ -32,7 +32,9 @@ impl TracingGuard {
 /// # Errors
 ///
 /// Returns an error if the OTLP span exporter fails to build.
-pub fn init_tracing(config: &OperatorConfig) -> Result<TracingGuard, trace::TraceError> {
+pub fn init_tracing(
+    config: &OperatorConfig,
+) -> Result<TracingGuard, opentelemetry_otlp::ExporterBuildError> {
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(config.log_level);
     if !config.tracing_enabled {
         tracing_subscriber::registry().with(fmt_layer).init();
@@ -44,8 +46,7 @@ pub fn init_tracing(config: &OperatorConfig) -> Result<TracingGuard, trace::Trac
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(format!("{}/v1/traces", config.otlp_endpoint))
-        .build()
-        .map_err(|e| trace::TraceError::from(e.to_string()))?;
+        .build()?;
     let sampler = if (config.tracing_sample_ratio - 1.0).abs() < f64::EPSILON {
         Sampler::AlwaysOn
     } else {
