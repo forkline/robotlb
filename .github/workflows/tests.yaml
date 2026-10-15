@@ -21,11 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Build locked release image
-        run: docker build --platform linux/amd64 --progress=plain -t robotlb:pr .
+        run: docker buildx build --platform linux/amd64 --load --progress=plain -t robotlb:pr .
       - name: Verify runtime dependencies and CLI startup
         run: |
-          docker run --rm --entrypoint /bin/sh robotlb:pr -c '
+          docker run --rm --platform linux/amd64 --entrypoint /bin/sh robotlb:pr -c '
             ldd /usr/local/bin/robotlb
             /usr/local/bin/robotlb --help > /dev/null
           '
