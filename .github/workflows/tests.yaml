@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build locked release image
-        run: docker build --progress=plain -t robotlb:pr .
+        run: docker build --platform linux/amd64 --progress=plain -t robotlb:pr .
       - name: Verify runtime dependencies and CLI startup
         run: |
           docker run --rm --entrypoint /bin/sh robotlb:pr -c '
