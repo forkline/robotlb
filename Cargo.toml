@@ -1,6 +1,6 @@
 [package]
 name = "robotlb"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2024"
 readme = "README.md"
 
@@ -30,6 +30,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
+
+[patch.crates-io]
+hcloud = { git = "https://github.com/pando85/hcloud-rust", branch = "v0.26.0-fix-deprecated" }
 
 [profile.release]
 codegen-units = 1
