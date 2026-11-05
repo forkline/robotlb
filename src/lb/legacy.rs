@@ -69,13 +69,11 @@ impl LegacyOwnership {
         if !self.names.contains(&lb.name) {
             return false;
         }
-        let mut addresses: HashSet<String> = [
-            lb.public_net.ipv4.ip.clone(),
-            lb.public_net.ipv6.ip.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let mut addresses: HashSet<String> =
+            [lb.public_net.ipv4.ip.clone(), lb.public_net.ipv6.ip.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
         addresses.extend(lb.private_net.iter().map(|net| net.ip.clone()));
         self.ingress_ips.iter().all(|ip| addresses.contains(ip))
     }
@@ -349,8 +347,8 @@ mod tests {
 
         replacement
             .services
-            .push(hcloud::models::LoadBalancerService::LoadBalancerServiceTcp(Box::new(
-                hcloud::models::LoadBalancerServiceTcp {
+            .push(hcloud::models::LoadBalancerService::LoadBalancerServiceTcp(
+                Box::new(hcloud::models::LoadBalancerServiceTcp {
                     listen_port: 6443,
                     destination_port: 32767,
                     protocol: hcloud::models::load_balancer_service_tcp::Protocol::Tcp,
@@ -363,8 +361,8 @@ mod tests {
                         retries: 3,
                         timeout: 10,
                     }),
-                },
-            )));
+                }),
+            ));
         assert!(!LegacyOwnership::is_unused_replacement(
             &replacement,
             "service-uid",

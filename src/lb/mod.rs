@@ -179,25 +179,21 @@ impl LoadBalancer {
                         listen_port,
                     );
                     let desired = UpdateLoadBalancerService {
+                        http: None,
+                        protocol: Some(hcloud::models::update_load_balancer_service::Protocol::Tcp),
+                        listen_port,
+                        destination_port: Some(destination_port),
+                        proxyprotocol: Some(self.proxy_mode),
+                        health_check: Some(Box::new(LoadBalancerServiceHealthCheck {
+                            protocol:
+                                hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
                             http: None,
-                            protocol: Some(
-                                hcloud::models::update_load_balancer_service::Protocol::Tcp,
-                            ),
-                            listen_port,
-                            destination_port: Some(destination_port),
-                            proxyprotocol: Some(self.proxy_mode),
-                            health_check: Some(Box::new(
-                                LoadBalancerServiceHealthCheck {
-                                    protocol:
-                                        hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
-                                    http: None,
-                                    interval: self.check_interval,
-                                    port: destination_port,
-                                    retries: self.retries,
-                                    timeout: self.timeout,
-                                },
-                            )),
-                        };
+                            interval: self.check_interval,
+                            port: destination_port,
+                            retries: self.retries,
+                            timeout: self.timeout,
+                        })),
+                    };
                     retry_temporary(|| api.update_service(hcloud_balancer.id, desired.clone()))
                         .await?;
                 }
@@ -532,9 +528,7 @@ impl LoadBalancer {
         for private_net in &hcloud_balancer.private_net {
             let private_net_id = private_net.network;
 
-            if desired_network == Some(private_net_id)
-                && self.matches_desired_ip(&private_net.ip)
-            {
+            if desired_network == Some(private_net_id) && self.matches_desired_ip(&private_net.ip) {
                 is_attached = true;
                 continue;
             }
@@ -1469,15 +1463,17 @@ mod tests {
         let mut lb = test_load_balancer();
         lb.targets = vec!["10.0.0.1".into()];
         let remote = hcloud::models::LoadBalancer {
-            targets: vec![hcloud::models::LoadBalancerTarget::LoadBalancerTargetTypeServer(
-                Box::new(hcloud::models::LoadBalancerTargetTypeServer {
-                    server: Box::new(hcloud::models::LoadBalancerTargetServer {
-                        id: 41,
-                        ip: "10.0.0.99".to_string(),
-                    }),
-                    ..Default::default()
-                }),
-            )],
+            targets: vec![
+                hcloud::models::LoadBalancerTarget::LoadBalancerTargetTypeServer(Box::new(
+                    hcloud::models::LoadBalancerTargetTypeServer {
+                        server: Box::new(hcloud::models::LoadBalancerTargetServer {
+                            id: 41,
+                            ip: "10.0.0.99".to_string(),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            ],
             ..Default::default()
         };
         assert!(matches!(
@@ -1526,11 +1522,13 @@ mod tests {
                         assert!(operations <= current_count + desired_count);
                         match action {
                             TargetReconcileAction::Remove { target_ip } => {
-                                remote.targets.retain(|target| match target {
+                                remote.targets.retain(|target| {
+                                    match target {
                                     hcloud::models::LoadBalancerTarget::LoadBalancerTargetTypeIp(
                                         ip_target,
                                     ) => ip_target.ip.ip != target_ip,
                                     _ => true,
+                                }
                                 });
                             }
                             TargetReconcileAction::Add { target_ip } => {
