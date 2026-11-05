@@ -37,6 +37,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install Helm unittest plugin
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --verify=false
       - name: Run Helm unittests
         run: helm unittest helm
