@@ -127,11 +127,42 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
         load_balancer_id: i64,
         service: LoadBalancerService,
     ) -> RobotLBResult<()> {
+        // Extract fields from the enum variant to build AddServiceRequest
+        let (listen_port, destination_port, protocol, proxyprotocol, health_check) = match service {
+            LoadBalancerService::LoadBalancerServiceTcp(tcp) => (
+                tcp.listen_port,
+                tcp.destination_port,
+                hcloud::models::add_service_request::Protocol::Tcp,
+                tcp.proxyprotocol,
+                *tcp.health_check,
+            ),
+            LoadBalancerService::LoadBalancerServiceHttpProtocol(http) => (
+                http.listen_port,
+                http.destination_port,
+                hcloud::models::add_service_request::Protocol::Http,
+                http.proxyprotocol,
+                *http.health_check,
+            ),
+            LoadBalancerService::LoadBalancerServiceHttpsProtocol(https) => (
+                https.listen_port,
+                https.destination_port,
+                hcloud::models::add_service_request::Protocol::Https,
+                https.proxyprotocol,
+                *https.health_check,
+            ),
+        };
         hcloud::apis::load_balancers_api::add_service(
             &self.hcloud_config,
             AddServiceParams {
                 id: load_balancer_id,
-                load_balancer_service: service,
+                add_service_request: hcloud::models::AddServiceRequest {
+                    listen_port,
+                    destination_port,
+                    protocol,
+                    proxyprotocol,
+                    health_check: Box::new(health_check),
+                    http: None,
+                },
             },
         )
         .await?;
@@ -189,7 +220,7 @@ impl HcloudLoadBalancerApi for LiveHcloudLoadBalancerApi {
             &self.hcloud_config,
             ChangeAlgorithmParams {
                 id: load_balancer_id,
-                body: algorithm,
+                load_balancer_algorithm: algorithm,
             },
         )
         .await?;
@@ -454,6 +485,10 @@ pub async fn create_load_balancer(
                 network: None,
                 network_zone: None,
                 public_interface: Some(public_interface),
+                public_net: Some(Box::new(hcloud::models::LoadBalancerCreatePublicNet {
+                    ipv4: None,
+                    ipv6: None,
+                })),
                 services: Some(vec![]),
                 targets: Some(vec![]),
             },

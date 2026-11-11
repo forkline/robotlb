@@ -25,19 +25,17 @@ pub fn build_ingress(
 
     if !public_interface {
         for private_net in &hcloud_lb.private_net {
-            if let Some(ip) = &private_net.ip {
-                ingress.push(LoadBalancerIngress {
-                    ip: Some(ip.clone()),
-                    ip_mode: Some(ip_mode.to_string()),
-                    ..Default::default()
-                });
-            }
+            ingress.push(LoadBalancerIngress {
+                ip: Some(private_net.ip.clone()),
+                ip_mode: Some(ip_mode.to_string()),
+                ..Default::default()
+            });
         }
         return ingress;
     }
 
-    let ipv4 = hcloud_lb.public_net.ipv4.ip.clone().flatten();
-    let ipv6 = hcloud_lb.public_net.ipv6.ip.clone().flatten();
+    let ipv4 = hcloud_lb.public_net.ipv4.ip.clone();
+    let ipv6 = hcloud_lb.public_net.ipv6.ip.clone();
 
     if let Some(ipv4) = &ipv4 {
         ingress.push(LoadBalancerIngress {
@@ -115,17 +113,21 @@ mod tests {
         hcloud::models::LoadBalancer {
             public_net: Box::new(hcloud::models::LoadBalancerPublicNet {
                 ipv4: Box::new(hcloud::models::LoadBalancerPublicNetIpv4 {
-                    ip: Some(Some("203.0.113.10".to_string())),
-                    dns_ptr: Some(Some("public.example.com".to_string())),
+                    ip: Some("203.0.113.10".to_string()),
+                    dns_ptr: Some("public.example.com".to_string()),
+                    blocked: false,
+                    id: None,
                 }),
                 ipv6: Box::new(hcloud::models::LoadBalancerPublicNetIpv6 {
-                    ip: Some(Some("2001:db8::10".to_string())),
-                    dns_ptr: Some(Some("public-v6.example.com".to_string())),
+                    ip: Some("2001:db8::10".to_string()),
+                    dns_ptr: Some("public-v6.example.com".to_string()),
+                    blocked: false,
+                    id: None,
                 }),
                 ..Default::default()
             }),
             private_net: vec![hcloud::models::LoadBalancerPrivateNet {
-                ip: Some("10.10.0.5".to_string()),
+                ip: "10.10.0.5".to_string(),
                 ..Default::default()
             }],
             ..Default::default()

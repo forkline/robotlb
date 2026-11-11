@@ -89,15 +89,21 @@ pub(super) fn service_matches_desired(
     timeout: i32,
     proxy_mode: bool,
 ) -> bool {
-    service.destination_port == destination_port
-        && service.health_check.port == destination_port
-        && service.health_check.interval == check_interval
-        && service.health_check.retries == retries
-        && service.health_check.timeout == timeout
-        && service.proxyprotocol == proxy_mode
-        && service.http.is_none()
-        && service.health_check.protocol
-            == hcloud::models::load_balancer_service_health_check::Protocol::Tcp
+    match service {
+        LoadBalancerService::LoadBalancerServiceTcp(tcp) => {
+            tcp.destination_port == destination_port
+                && tcp.health_check.port == destination_port
+                && tcp.health_check.interval == check_interval
+                && tcp.health_check.retries == retries
+                && tcp.health_check.timeout == timeout
+                && tcp.proxyprotocol == proxy_mode
+                && tcp.health_check.protocol
+                    == hcloud::models::load_balancer_service_health_check::Protocol::Tcp
+        }
+        // HTTP and HTTPS services don't match our TCP-only desired configuration
+        LoadBalancerService::LoadBalancerServiceHttpProtocol(_)
+        | LoadBalancerService::LoadBalancerServiceHttpsProtocol(_) => false,
+    }
 }
 
 /// Normalize an IP address by removing any CIDR suffix.
