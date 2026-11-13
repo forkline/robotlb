@@ -172,6 +172,7 @@ pub enum RobotLBError {
 
 impl RobotLBError {
     /// Whether Hetzner rejected an operation due to the project-wide request quota.
+    #[must_use]
     pub const fn is_rate_limited(&self) -> bool {
         match self {
             Self::HCloudLBAttachToNetworkError(e) => is_rate_limit(e),
@@ -219,6 +220,7 @@ fn is_transient_hcloud<E>(err: &hcloud::apis::Error<E>) -> bool {
 impl RobotLBError {
     /// Temporary Hetzner conflicts and server errors can be retried with a short backoff.
     /// Rate-limit errors (429) use the separate project-wide gate.
+    #[must_use]
     pub fn is_transient_hcloud(&self) -> bool {
         match self {
             Self::HcloudLBAddTargetError(e) => is_transient_hcloud(e),
@@ -238,6 +240,7 @@ impl RobotLBError {
     }
 
     /// The target was added by a previous attempt whose response was lost.
+    #[must_use]
     pub fn target_already_defined(&self) -> bool {
         let Self::HcloudLBAddTargetError(hcloud::apis::Error::ResponseError(response)) = self
         else {
