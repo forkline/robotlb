@@ -1424,9 +1424,9 @@ dependencies = [
 
 [[package]]
 name = "kube-leader-election"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28df9cc012a02b29debe699bb38dac42c3f8ae9c928e5db524a74559624f4d88"
+checksum = "3c9447b3c61439b157edd2188cf86e370b22acd5f784aa9228f63f74d396c2de"
 dependencies = [
  "jiff",
  "k8s-openapi",
