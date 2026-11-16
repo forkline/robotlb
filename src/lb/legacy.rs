@@ -69,14 +69,12 @@ impl LegacyOwnership {
         if !self.names.contains(&lb.name) {
             return false;
         }
-        let mut addresses: HashSet<String> = [
-            lb.public_net.ipv4.ip.clone().flatten(),
-            lb.public_net.ipv6.ip.clone().flatten(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        addresses.extend(lb.private_net.iter().filter_map(|net| net.ip.clone()));
+        let mut addresses: HashSet<String> =
+            [lb.public_net.ipv4.ip.clone(), lb.public_net.ipv6.ip.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+        addresses.extend(lb.private_net.iter().map(|net| net.ip.clone()));
         self.ingress_ips.iter().all(|ip| addresses.contains(ip))
     }
 
@@ -150,8 +148,10 @@ mod tests {
             name: "web.default".into(),
             public_net: Box::new(hcloud::models::LoadBalancerPublicNet {
                 ipv4: Box::new(hcloud::models::LoadBalancerPublicNetIpv4 {
-                    ip: Some(Some("203.0.113.10".into())),
-                    ..Default::default()
+                    ip: Some("203.0.113.10".into()),
+                    blocked: false,
+                    id: None,
+                    dns_ptr: None,
                 }),
                 ..Default::default()
             }),
@@ -196,7 +196,7 @@ mod tests {
     fn never_adopts_a_name_collision_or_foreign_owner() {
         let proof = LegacyOwnership::from_service(&service(), &config()).unwrap();
         let mut lb = balancer();
-        lb.public_net.ipv4.ip = Some(Some("198.51.100.20".into()));
+        lb.public_net.ipv4.ip = Some("198.51.100.20".into());
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_none());
 
         let mut lb = balancer();
@@ -223,7 +223,7 @@ mod tests {
         let proof = LegacyOwnership::from_service(&svc, &config()).unwrap();
         let mut lb = balancer();
         lb.private_net = vec![hcloud::models::LoadBalancerPrivateNet {
-            ip: Some("10.0.0.10".into()),
+            ip: "10.0.0.10".into(),
             ..Default::default()
         }];
         assert!(proof.labels_for_adoption(&lb, "service-uid").is_some());
@@ -286,11 +286,11 @@ mod tests {
         let mut old_lb = balancer();
         old_lb.name = "web".into();
         old_lb.private_net = vec![hcloud::models::LoadBalancerPrivateNet {
-            ip: Some("172.29.0.1".into()),
+            ip: "172.29.0.1".into(),
             ..Default::default()
         }];
         assert!(proof.labels_for_adoption(&old_lb, "service-uid").is_some());
-        old_lb.private_net[0].ip = Some("172.29.0.2".into());
+        old_lb.private_net[0].ip = "172.29.0.2".into();
         assert!(proof.labels_for_adoption(&old_lb, "service-uid").is_none());
     }
 
@@ -347,21 +347,22 @@ mod tests {
 
         replacement
             .services
-            .push(hcloud::models::LoadBalancerService {
-                http: None,
-                listen_port: 6443,
-                destination_port: 32767,
-                protocol: hcloud::models::load_balancer_service::Protocol::Tcp,
-                proxyprotocol: false,
-                health_check: Box::new(hcloud::models::LoadBalancerServiceHealthCheck {
-                    http: None,
-                    interval: 15,
-                    port: 32767,
-                    protocol: hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
-                    retries: 3,
-                    timeout: 10,
+            .push(hcloud::models::LoadBalancerService::LoadBalancerServiceTcp(
+                Box::new(hcloud::models::LoadBalancerServiceTcp {
+                    listen_port: 6443,
+                    destination_port: 32767,
+                    protocol: hcloud::models::load_balancer_service_tcp::Protocol::Tcp,
+                    proxyprotocol: false,
+                    health_check: Box::new(hcloud::models::LoadBalancerServiceHealthCheck {
+                        http: None,
+                        interval: 15,
+                        port: 32767,
+                        protocol: hcloud::models::load_balancer_service_health_check::Protocol::Tcp,
+                        retries: 3,
+                        timeout: 10,
+                    }),
                 }),
-            });
+            ));
         assert!(!LegacyOwnership::is_unused_replacement(
             &replacement,
             "service-uid",
