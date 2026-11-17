@@ -174,5 +174,7 @@
   "platformAutomerge": false,
   "automergeStrategy": "squash",
   "ignoreTests": false,
-  "dependencyDashboard": true
+  "dependencyDashboard": {
+    "enabled": true
+  }
 }
